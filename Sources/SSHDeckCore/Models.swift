@@ -1,7 +1,30 @@
 import Foundation
 
+public enum SSHRouteKind: String, Sendable {
+    case localTunnel
+    case directLAN
+    case remote
+
+    public var label: String {
+        switch self {
+        case .localTunnel: return "Local Tunnel"
+        case .directLAN: return "LAN Direct"
+        case .remote: return "Remote"
+        }
+    }
+
+    public var shortBadge: String {
+        switch self {
+        case .localTunnel: return "Tunnel"
+        case .directLAN: return "LAN"
+        case .remote: return "WAN"
+        }
+    }
+}
+
 public struct SSHHost: Identifiable, Hashable, Sendable {
     public let alias: String
+    public let alternateAliases: [String]
     public let hostName: String
     public let user: String
     public let port: Int
@@ -15,6 +38,7 @@ public struct SSHHost: Identifiable, Hashable, Sendable {
 
     public init(
         alias: String,
+        alternateAliases: [String] = [],
         hostName: String,
         user: String,
         port: Int,
@@ -25,6 +49,7 @@ public struct SSHHost: Identifiable, Hashable, Sendable {
         localForwards: [String] = []
     ) {
         self.alias = alias
+        self.alternateAliases = alternateAliases
         self.hostName = hostName
         self.user = user
         self.port = port
@@ -33,6 +58,10 @@ public struct SSHHost: Identifiable, Hashable, Sendable {
         self.serverAliveInterval = serverAliveInterval
         self.compression = compression
         self.localForwards = localForwards
+    }
+
+    public var allAliases: [String] {
+        [alias] + alternateAliases
     }
 
     public var endpoint: String {
@@ -53,6 +82,29 @@ public struct SSHHost: Identifiable, Hashable, Sendable {
         }
         return endpoint
     }
+
+    public var routeKind: SSHRouteKind {
+        let lower = hostName.lowercased()
+        if lower == "127.0.0.1" || lower == "::1" || lower == "localhost" {
+            return .localTunnel
+        }
+        if lower.hasPrefix("10.") ||
+            lower.hasPrefix("192.168.") ||
+            lower.hasPrefix("fe80:") ||
+            lower.hasSuffix(".local") ||
+            Self.isPrivate172(lower) {
+            return .directLAN
+        }
+        return .remote
+    }
+
+    private static func isPrivate172(_ host: String) -> Bool {
+        let parts = host.split(separator: ".")
+        guard parts.count == 4, parts[0] == "172", let second = Int(parts[1]) else {
+            return false
+        }
+        return (16...31).contains(second)
+    }
 }
 
 public struct GPUInfo: Identifiable, Hashable, Sendable {
@@ -63,6 +115,7 @@ public struct GPUInfo: Identifiable, Hashable, Sendable {
     public let memoryTotalMB: Double?
     public let temperatureC: Double?
     public let powerW: Double?
+    public let isSleeping: Bool
 
     public init(
         name: String,
@@ -70,7 +123,8 @@ public struct GPUInfo: Identifiable, Hashable, Sendable {
         memoryUsedMB: Double? = nil,
         memoryTotalMB: Double? = nil,
         temperatureC: Double? = nil,
-        powerW: Double? = nil
+        powerW: Double? = nil,
+        isSleeping: Bool = false
     ) {
         self.name = name
         self.utilization = utilization
@@ -78,6 +132,12 @@ public struct GPUInfo: Identifiable, Hashable, Sendable {
         self.memoryTotalMB = memoryTotalMB
         self.temperatureC = temperatureC
         self.powerW = powerW
+        self.isSleeping = isSleeping
+    }
+
+    public var isAMD: Bool {
+        let lower = name.lowercased()
+        return lower.contains("amd") || lower.contains("radeon") || lower.contains("instinct")
     }
 
     public var memoryFraction: Double? {
@@ -233,6 +293,8 @@ public struct HostMetrics: Sendable {
     public let kernel: String
     public let architecture: String
     public let user: String
+    public let homeDirectory: String
+    public let candidateDirectories: [String]
     public let cpuModel: String
     public let cpuCores: Int
     public let cpuUsage: Double
@@ -250,6 +312,7 @@ public struct HostMetrics: Sendable {
     public let gpus: [GPUInfo]
     public let processes: [RemoteProcess]
     public let slurm: SlurmInfo?
+    public let scriptDurationMilliseconds: Double?
     public let capturedAt: Date
 
     public init(
@@ -258,6 +321,8 @@ public struct HostMetrics: Sendable {
         kernel: String,
         architecture: String,
         user: String,
+        homeDirectory: String = "",
+        candidateDirectories: [String] = [],
         cpuModel: String,
         cpuCores: Int,
         cpuUsage: Double,
@@ -275,6 +340,7 @@ public struct HostMetrics: Sendable {
         gpus: [GPUInfo] = [],
         processes: [RemoteProcess] = [],
         slurm: SlurmInfo? = nil,
+        scriptDurationMilliseconds: Double? = nil,
         capturedAt: Date = Date()
     ) {
         self.hostname = hostname
@@ -282,6 +348,8 @@ public struct HostMetrics: Sendable {
         self.kernel = kernel
         self.architecture = architecture
         self.user = user
+        self.homeDirectory = homeDirectory
+        self.candidateDirectories = candidateDirectories
         self.cpuModel = cpuModel
         self.cpuCores = cpuCores
         self.cpuUsage = cpuUsage
@@ -299,6 +367,7 @@ public struct HostMetrics: Sendable {
         self.gpus = gpus
         self.processes = processes
         self.slurm = slurm
+        self.scriptDurationMilliseconds = scriptDurationMilliseconds
         self.capturedAt = capturedAt
     }
 
@@ -376,4 +445,471 @@ public struct HostProbeResult: Sendable {
     }
 
     public var isSuccess: Bool { metrics != nil }
+}
+
+// MARK: - Directory Mount Models
+
+public struct FolderMountConfig: Identifiable, Codable, Hashable, Sendable {
+    public var id: UUID
+    public var hostAlias: String
+    public var label: String
+    public var remotePath: String
+    public var localPath: String
+    public var autoMount: Bool
+
+    public init(
+        id: UUID = UUID(),
+        hostAlias: String,
+        label: String,
+        remotePath: String,
+        localPath: String,
+        autoMount: Bool = true
+    ) {
+        self.id = id
+        self.hostAlias = hostAlias
+        self.label = label
+        self.remotePath = remotePath
+        self.localPath = localPath
+        self.autoMount = autoMount
+    }
+
+    public var expandedLocalPath: String {
+        (localPath as NSString).expandingTildeInPath
+    }
+
+    public var displayLocalPath: String {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let expanded = expandedLocalPath
+        if expanded.hasPrefix(home + "/") {
+            return "~" + expanded.dropFirst(home.count)
+        }
+        return expanded
+    }
+}
+
+public enum MountSourceKind: String, Hashable, Sendable {
+    case managedSFTP
+    case externalSystem
+}
+
+public enum MountRuntimeState: String, Hashable, Sendable {
+    case unmounted
+    case mounting
+    case mounted
+    case unmounting
+    case error
+}
+
+public struct SystemMountEntry: Hashable, Sendable {
+    public let source: String
+    public let localPath: String
+    public let canonicalLocalPath: String
+    public let fileSystemType: String
+
+    public init(source: String, localPath: String, canonicalLocalPath: String, fileSystemType: String) {
+        self.source = source
+        self.localPath = localPath
+        self.canonicalLocalPath = canonicalLocalPath
+        self.fileSystemType = fileSystemType
+    }
+}
+
+public struct FolderMountItem: Identifiable, Hashable, Sendable {
+    public let id: String
+    public let config: FolderMountConfig?
+    public let hostAlias: String
+    public let label: String
+    public let remoteDescription: String
+    public let localPath: String
+    public let displayLocalPath: String
+    public let fileSystemType: String?
+    public let sourceKind: MountSourceKind
+    public let state: MountRuntimeState
+    public let errorMessage: String?
+
+    public init(
+        id: String,
+        config: FolderMountConfig?,
+        hostAlias: String,
+        label: String,
+        remoteDescription: String,
+        localPath: String,
+        displayLocalPath: String,
+        fileSystemType: String?,
+        sourceKind: MountSourceKind,
+        state: MountRuntimeState,
+        errorMessage: String? = nil
+    ) {
+        self.id = id
+        self.config = config
+        self.hostAlias = hostAlias
+        self.label = label
+        self.remoteDescription = remoteDescription
+        self.localPath = localPath
+        self.displayLocalPath = displayLocalPath
+        self.fileSystemType = fileSystemType
+        self.sourceKind = sourceKind
+        self.state = state
+        self.errorMessage = errorMessage
+    }
+
+    public var isMounted: Bool {
+        state == .mounted
+    }
+
+    public var isBusy: Bool {
+        state == .mounting || state == .unmounting
+    }
+}
+
+// MARK: - GOST Tunnel & Remote Desktop Models
+
+public enum TunnelRole: String, Codable, CaseIterable, Hashable, Sendable {
+    case ssh
+    case moonlight
+    case rdp
+    case custom
+
+    public var label: String {
+        switch self {
+        case .ssh: return "SSH"
+        case .moonlight: return "Moonlight"
+        case .rdp: return "RDP"
+        case .custom: return "Custom"
+        }
+    }
+
+    public var symbol: String {
+        switch self {
+        case .ssh: return "terminal.fill"
+        case .moonlight: return "display.2"
+        case .rdp: return "rectangle.on.rectangle"
+        case .custom: return "point.3.connected.trianglepath.dotted"
+        }
+    }
+}
+
+public struct GostTunnelConfig: Identifiable, Codable, Hashable, Sendable {
+    public var id: UUID
+    public var hostAlias: String
+    public var label: String
+    public var role: TunnelRole
+    public var listenSpecs: [String]
+    public var forwardChain: String
+    public var autoStart: Bool
+
+    public init(
+        id: UUID = UUID(),
+        hostAlias: String,
+        label: String,
+        role: TunnelRole = .ssh,
+        listenSpecs: [String],
+        forwardChain: String,
+        autoStart: Bool = true
+    ) {
+        self.id = id
+        self.hostAlias = hostAlias
+        self.label = label
+        self.role = role
+        self.listenSpecs = listenSpecs
+        self.forwardChain = forwardChain
+        self.autoStart = autoStart
+    }
+
+    public struct DirectUDPRule: Hashable, Sendable {
+        public let localHost: String
+        public let localPort: Int
+        public let remoteHost: String
+        public let remotePort: Int
+
+        public init(localHost: String, localPort: Int, remoteHost: String, remotePort: Int) {
+            self.localHost = localHost
+            self.localPort = localPort
+            self.remoteHost = remoteHost
+            self.remotePort = remotePort
+        }
+    }
+
+    public var gostListenSpecs: [String] {
+        listenSpecs
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && !$0.lowercased().hasPrefix("udp-direct://") }
+    }
+
+    public var directUDPRules: [DirectUDPRule] {
+        listenSpecs.compactMap { Self.parseDirectUDPRule($0) }
+    }
+
+    public var primaryLocalPort: Int? {
+        for spec in listenSpecs where spec.lowercased().hasPrefix("tcp://") {
+            if let port = Self.extractLocalPort(from: spec) {
+                return port
+            }
+        }
+        for spec in listenSpecs {
+            if let port = Self.extractLocalPort(from: spec) {
+                return port
+            }
+        }
+        return nil
+    }
+
+    public var moonlightHTTPPort: Int? {
+        guard role == .moonlight else { return nil }
+        let tcpPorts = gostListenSpecs.compactMap { Self.extractLocalPort(from: $0) }
+        // In Sunshine's port layout, HTTP is base port (e.g. 47989 or 48989), HTTPS is base - 5, Web UI is base + 1
+        for port in tcpPorts where tcpPorts.contains(port - 5) && tcpPorts.contains(port + 1) {
+            return port
+        }
+        return tcpPorts.first { $0 % 100 == 89 } ?? primaryLocalPort
+    }
+
+    public var moonlightStreamEndpoint: String? {
+        guard let httpPort = moonlightHTTPPort else { return nil }
+        return httpPort == 47989 ? "127.0.0.1" : "127.0.0.1:\(httpPort)"
+    }
+
+    public var sunshineWebPort: Int? {
+        guard let httpPort = moonlightHTTPPort else { return nil }
+        return httpPort + 1
+    }
+
+    public var portSummary: String {
+        if role == .moonlight, listenSpecs.count > 2 {
+            let httpPort = moonlightHTTPPort ?? 47989
+            if !directUDPRules.isEmpty {
+                return "127.0.0.1:\(httpPort) · QUIC TCP + LAN UDP"
+            }
+            return "127.0.0.1:\(httpPort) · TCP+UDP Stream"
+        }
+        if let first = listenSpecs.first {
+            let stripped = first
+                .replacingOccurrences(of: "tcp://", with: "")
+                .replacingOccurrences(of: "udp-direct://", with: "UDP ")
+                .replacingOccurrences(of: "udp://", with: "UDP ")
+            let parts = stripped.split(separator: "/", maxSplits: 1).map(String.init)
+            if parts.count == 2 {
+                let lhs = parts[0].replacingOccurrences(of: "127.0.0.1:", with: ":")
+                let rhs = parts[1].replacingOccurrences(of: "127.0.0.1:", with: ":")
+                let extra = listenSpecs.count > 1 ? " (+\(listenSpecs.count - 1))" : ""
+                return "\(lhs) → \(rhs)\(extra)"
+            }
+            return stripped
+        }
+        return "Unconfigured"
+    }
+
+    public var forwardHost: String? {
+        guard let schemeRange = forwardChain.range(of: "://") else { return nil }
+        var remainder = String(forwardChain[schemeRange.upperBound...])
+        if let queryIdx = remainder.firstIndex(of: "?") {
+            remainder = String(remainder[..<queryIdx])
+        }
+        if let atIdx = remainder.lastIndex(of: "@") {
+            remainder = String(remainder[remainder.index(after: atIdx)...])
+        }
+        if let colonIdx = remainder.lastIndex(of: ":") {
+            let host = String(remainder[..<colonIdx])
+            return host.isEmpty ? nil : host
+        }
+        return remainder.isEmpty ? nil : remainder
+    }
+
+    public var redactedForwardEndpoint: String {
+        guard let schemeRange = forwardChain.range(of: "://") else {
+            return forwardChain
+        }
+        let scheme = String(forwardChain[..<schemeRange.lowerBound])
+        var remainder = String(forwardChain[schemeRange.upperBound...])
+        if let queryIdx = remainder.firstIndex(of: "?") {
+            remainder = String(remainder[..<queryIdx])
+        }
+        if let atIdx = remainder.lastIndex(of: "@") {
+            remainder = String(remainder[remainder.index(after: atIdx)...])
+        }
+        return "\(scheme)://\(remainder)"
+    }
+
+    public static func parseDirectUDPRule(_ spec: String) -> DirectUDPRule? {
+        let trimmed = spec.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.lowercased().hasPrefix("udp-direct://"),
+              let schemeEnd = trimmed.range(of: "://")?.upperBound
+        else { return nil }
+        var body = String(trimmed[schemeEnd...])
+        if let qIdx = body.firstIndex(of: "?") {
+            body = String(body[..<qIdx])
+        }
+        let parts = body.split(separator: "/", maxSplits: 1).map(String.init)
+        guard parts.count == 2,
+              let (lHost, lPort) = splitHostPort(parts[0]),
+              let (rHost, rPort) = splitHostPort(parts[1])
+        else { return nil }
+        return DirectUDPRule(localHost: lHost, localPort: lPort, remoteHost: rHost, remotePort: rPort)
+    }
+
+    private static func splitHostPort(_ endpoint: String) -> (String, Int)? {
+        guard let colon = endpoint.lastIndex(of: ":") else { return nil }
+        let host = String(endpoint[..<colon]).trimmingCharacters(in: .whitespaces)
+        guard !host.isEmpty,
+              let port = Int(endpoint[endpoint.index(after: colon)...]),
+              (1...65535).contains(port)
+        else { return nil }
+        return (host, port)
+    }
+
+    private static func extractLocalPort(from spec: String) -> Int? {
+        guard let schemeEnd = spec.range(of: "://")?.upperBound else { return nil }
+        var afterScheme = String(spec[schemeEnd...])
+        if let qIdx = afterScheme.firstIndex(of: "?") {
+            afterScheme = String(afterScheme[..<qIdx])
+        }
+        let bindPart = afterScheme.split(separator: "/", maxSplits: 1).first.map(String.init) ?? afterScheme
+        guard let colon = bindPart.lastIndex(of: ":") else { return nil }
+        return Int(bindPart[bindPart.index(after: colon)...])
+    }
+}
+
+public enum TunnelRuntimeState: String, Hashable, Sendable {
+    case stopped
+    case starting
+    case running
+    case error
+}
+
+public struct TunnelRuntimeItem: Identifiable, Hashable, Sendable {
+    public var id: UUID { config.id }
+    public let config: GostTunnelConfig
+    public let state: TunnelRuntimeState
+    public let pid: Int32?
+    public let portOpen: Bool
+    public let errorMessage: String?
+
+    public init(
+        config: GostTunnelConfig,
+        state: TunnelRuntimeState,
+        pid: Int32? = nil,
+        portOpen: Bool = false,
+        errorMessage: String? = nil
+    ) {
+        self.config = config
+        self.state = state
+        self.pid = pid
+        self.portOpen = portOpen
+        self.errorMessage = errorMessage
+    }
+
+    public var isRunning: Bool {
+        state == .running
+    }
+}
+
+public struct MoonlightTarget: Identifiable, Hashable, Sendable {
+    public var id: String { "\(hostAlias.lowercased())-\(streamEndpoint)" }
+    public let hostAlias: String
+    public let title: String
+    public let subtitle: String
+    public let streamEndpoint: String
+    public let webURLString: String
+    public let tunnelConfig: GostTunnelConfig?
+
+    public init(
+        hostAlias: String,
+        title: String,
+        subtitle: String,
+        streamEndpoint: String,
+        webURLString: String,
+        tunnelConfig: GostTunnelConfig? = nil
+    ) {
+        self.hostAlias = hostAlias
+        self.title = title
+        self.subtitle = subtitle
+        self.streamEndpoint = streamEndpoint
+        self.webURLString = webURLString
+        self.tunnelConfig = tunnelConfig
+    }
+}
+
+// MARK: - VS Code Remote-SSH Workspace Models
+
+public enum VSCodeWorkspaceKind: String, Codable, Hashable, Sendable {
+    case folder
+    case workspaceFile
+}
+
+public struct VSCodeRawEntry: Hashable, Sendable {
+    public let rawURI: String
+    public let authorityHost: String
+    public let authorityUser: String?
+    public let remotePath: String
+    public let kind: VSCodeWorkspaceKind
+    public let isOpenInWindow: Bool
+    public let isLastActive: Bool
+    public let lastOpenedAt: Date?
+
+    public init(
+        rawURI: String,
+        authorityHost: String,
+        authorityUser: String?,
+        remotePath: String,
+        kind: VSCodeWorkspaceKind,
+        isOpenInWindow: Bool,
+        isLastActive: Bool,
+        lastOpenedAt: Date?
+    ) {
+        self.rawURI = rawURI
+        self.authorityHost = authorityHost
+        self.authorityUser = authorityUser
+        self.remotePath = remotePath
+        self.kind = kind
+        self.isOpenInWindow = isOpenInWindow
+        self.isLastActive = isLastActive
+        self.lastOpenedAt = lastOpenedAt
+    }
+}
+
+public struct VSCodeWorkspaceItem: Identifiable, Hashable, Sendable {
+    public var id: String { "\(hostAlias.lowercased())::\(kind.rawValue)::\(remotePath)" }
+    public let hostAlias: String
+    public let effectiveAuthority: String
+    public let originalAuthority: String
+    public let remotePath: String
+    public let kind: VSCodeWorkspaceKind
+    public let isOpenInWindow: Bool
+    public let isLastActive: Bool
+    public let lastOpenedAt: Date?
+
+    public init(
+        hostAlias: String,
+        effectiveAuthority: String,
+        originalAuthority: String,
+        remotePath: String,
+        kind: VSCodeWorkspaceKind,
+        isOpenInWindow: Bool,
+        isLastActive: Bool,
+        lastOpenedAt: Date?
+    ) {
+        self.hostAlias = hostAlias
+        self.effectiveAuthority = effectiveAuthority
+        self.originalAuthority = originalAuthority
+        self.remotePath = remotePath
+        self.kind = kind
+        self.isOpenInWindow = isOpenInWindow
+        self.isLastActive = isLastActive
+        self.lastOpenedAt = lastOpenedAt
+    }
+
+    public var name: String {
+        let trimmed = remotePath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        if trimmed.isEmpty { return "/" }
+        let base = URL(fileURLWithPath: "/" + trimmed).lastPathComponent
+        if kind == .workspaceFile, base.hasSuffix(".code-workspace") {
+            return String(base.dropLast(".code-workspace".count))
+        }
+        return base
+    }
+
+    public var vscodeRemoteURI: String {
+        let normalized = remotePath.hasPrefix("/") ? remotePath : "/" + remotePath
+        return "vscode-remote://ssh-remote+\(effectiveAuthority)\(normalized)"
+    }
 }

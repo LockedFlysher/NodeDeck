@@ -26,17 +26,40 @@ public enum SSHConfigParser {
     }
 
     public static func discover(configURL: URL = defaultConfigURL) throws -> [SSHHost] {
-        let aliases = try discoverAliases(configURL: configURL)
-        guard !aliases.isEmpty else {
+        let groups = try discoverHostGroups(configURL: configURL)
+        guard !groups.isEmpty else {
             throw SSHConfigError.noHosts
         }
-        return aliases.map(resolve)
+
+        final class ResultBox: @unchecked Sendable {
+            var items: [SSHHost?]
+            let lock = NSLock()
+            init(count: Int) { self.items = Array(repeating: nil, count: count) }
+        }
+
+        let box = ResultBox(count: groups.count)
+        DispatchQueue.concurrentPerform(iterations: groups.count) { index in
+            let group = groups[index]
+            let host = resolve(alias: group.primary, alternateAliases: group.alternates)
+            box.lock.lock()
+            box.items[index] = host
+            box.lock.unlock()
+        }
+
+        return box.items.compactMap { $0 }
     }
 
     public static func discoverAliases(configURL: URL) throws -> [String] {
+        let groups = try discoverHostGroups(configURL: configURL)
+        return groups.flatMap { [$0.primary] + $0.alternates }
+    }
+
+    public static func discoverHostGroups(
+        configURL: URL
+    ) throws -> [(primary: String, alternates: [String])] {
         var visitedFiles = Set<String>()
         var seenAliases = Set<String>()
-        var aliases: [String] = []
+        var groups: [(primary: String, alternates: [String])] = []
 
         guard FileManager.default.fileExists(atPath: configURL.path) else {
             throw SSHConfigError.configNotFound(configURL.path)
@@ -47,9 +70,9 @@ public enum SSHConfigParser {
             depth: 0,
             visitedFiles: &visitedFiles,
             seenAliases: &seenAliases,
-            aliases: &aliases
+            groups: &groups
         )
-        return aliases
+        return groups
     }
 
     private static func parseFile(
@@ -57,7 +80,7 @@ public enum SSHConfigParser {
         depth: Int,
         visitedFiles: inout Set<String>,
         seenAliases: inout Set<String>,
-        aliases: inout [String]
+        groups: inout [(primary: String, alternates: [String])]
     ) throws {
         guard depth < 12 else { return }
 
@@ -75,12 +98,16 @@ public enum SSHConfigParser {
 
             switch keyword {
             case "host":
+                var concreteInLine: [String] = []
                 for alias in tokens.dropFirst() {
                     guard isConcreteHostPattern(alias), !seenAliases.contains(alias) else {
                         continue
                     }
                     seenAliases.insert(alias)
-                    aliases.append(alias)
+                    concreteInLine.append(alias)
+                }
+                if let primary = concreteInLine.first {
+                    groups.append((primary: primary, alternates: Array(concreteInLine.dropFirst())))
                 }
 
             case "include":
@@ -91,7 +118,7 @@ public enum SSHConfigParser {
                             depth: depth + 1,
                             visitedFiles: &visitedFiles,
                             seenAliases: &seenAliases,
-                            aliases: &aliases
+                            groups: &groups
                         )
                     }
                 }
@@ -102,7 +129,7 @@ public enum SSHConfigParser {
         }
     }
 
-    private static func resolve(_ alias: String) -> SSHHost {
+    private static func resolve(alias: String, alternateAliases: [String]) -> SSHHost {
         let result = ProcessRunner.run(
             executable: "/usr/bin/ssh",
             arguments: ["-G", alias],
@@ -112,6 +139,7 @@ public enum SSHConfigParser {
         guard result.status == 0 else {
             return SSHHost(
                 alias: alias,
+                alternateAliases: alternateAliases,
                 hostName: alias,
                 user: NSUserName(),
                 port: 22
@@ -128,14 +156,23 @@ public enum SSHConfigParser {
         let port = values["port"].flatMap { Int($0.first ?? "") } ?? 22
         let interval = values["serveraliveinterval"].flatMap { Int($0.first ?? "") }
         let compression = values["compression"]?.first?.lowercased() == "yes"
+        let identityFiles = values["identityfile"] ?? []
+        let chosenIdentity = identityFiles.first(where: { raw in
+            let expanded = (raw as NSString).expandingTildeInPath
+            return FileManager.default.fileExists(atPath: expanded)
+        }) ?? identityFiles.first
+
+        let proxyJumpRaw = values["proxyjump"]?.first
+        let proxyJump = (proxyJumpRaw?.lowercased() == "none") ? nil : proxyJumpRaw
 
         return SSHHost(
             alias: alias,
+            alternateAliases: alternateAliases,
             hostName: values["hostname"]?.first ?? alias,
             user: values["user"]?.first ?? NSUserName(),
             port: port,
-            identityFile: values["identityfile"]?.first,
-            proxyJump: values["proxyjump"]?.first,
+            identityFile: chosenIdentity,
+            proxyJump: proxyJump,
             serverAliveInterval: interval,
             compression: compression,
             localForwards: values["localforward"] ?? []

@@ -5,9 +5,12 @@ import SwiftUI
 enum AppTheme {
     static let accent = Color(red: 0.08, green: 0.52, blue: 0.46)
     static let cpu = Color(red: 0.10, green: 0.54, blue: 0.48)
+    static let amdGPU = Color(red: 0.78, green: 0.28, blue: 0.24)
     static let memory = Color(red: 0.78, green: 0.45, blue: 0.15)
     static let disk = Color(red: 0.18, green: 0.42, blue: 0.70)
     static let load = Color(red: 0.67, green: 0.29, blue: 0.31)
+    static let warning = Color(red: 0.84, green: 0.52, blue: 0.12)
+    static let critical = Color(red: 0.78, green: 0.23, blue: 0.25)
     static let card = Color(nsColor: .controlBackgroundColor)
     static let subtleBorder = Color(nsColor: .separatorColor).opacity(0.45)
 
@@ -22,6 +25,53 @@ enum AppTheme {
         case .idle:
             return Color(nsColor: .tertiaryLabelColor)
         }
+    }
+
+    static func mountColor(_ state: MountRuntimeState) -> Color {
+        switch state {
+        case .mounted:
+            return Color(red: 0.16, green: 0.62, blue: 0.37)
+        case .mounting, .unmounting:
+            return Color(red: 0.82, green: 0.54, blue: 0.13)
+        case .error:
+            return Color(red: 0.78, green: 0.25, blue: 0.27)
+        case .unmounted:
+            return Color(nsColor: .secondaryLabelColor)
+        }
+    }
+
+    static func tunnelColor(_ state: TunnelRuntimeState) -> Color {
+        switch state {
+        case .running:
+            return Color(red: 0.16, green: 0.62, blue: 0.37)
+        case .starting:
+            return Color(red: 0.82, green: 0.54, blue: 0.13)
+        case .error:
+            return Color(red: 0.78, green: 0.25, blue: 0.27)
+        case .stopped:
+            return Color(nsColor: .tertiaryLabelColor)
+        }
+    }
+
+    static func routeColor(_ route: SSHRouteKind) -> Color {
+        switch route {
+        case .localTunnel:
+            return Color(red: 0.12, green: 0.55, blue: 0.49)
+        case .directLAN:
+            return Color(red: 0.18, green: 0.48, blue: 0.75)
+        case .remote:
+            return Color(red: 0.52, green: 0.42, blue: 0.68)
+        }
+    }
+
+    static func severityColor(fraction: Double, base: Color) -> Color {
+        if fraction >= 0.92 {
+            return critical
+        }
+        if fraction >= 0.80 {
+            return warning
+        }
+        return base
     }
 
     static func slurmColor(_ category: SlurmNodeCategory) -> Color {
@@ -74,6 +124,14 @@ enum DisplayFormat {
         return "\(value) B"
     }
 
+    static func vram(usedMB: Double?, totalMB: Double?) -> String {
+        guard let used = usedMB, let total = totalMB else { return "--" }
+        if total >= 1_024 {
+            return String(format: "%.1f / %.1f GB", used / 1_024, total / 1_024)
+        }
+        return "\(Int(used)) / \(Int(total)) MB"
+    }
+
     static func percent(_ fraction: Double) -> String {
         String(format: "%.0f%%", min(max(fraction, 0), 1) * 100)
     }
@@ -116,21 +174,25 @@ struct HostAvatar: View {
     var size: CGFloat = 38
 
     private var symbolName: String {
-        let alias = host.alias.lowercased()
-        if alias.contains("phone") || alias.contains("termux") {
+        let combined = host.allAliases.joined(separator: " ").lowercased()
+        if combined.contains("phone") || combined.contains("termux") {
             return "iphone"
         }
-        if alias.contains("cluster") || alias.contains("hpcc") {
-            return "server.rack"
+        if combined.contains("cluster") || combined.contains("slurm") || combined.contains("hpc") {
+            return "square.stack.3d.up.fill"
         }
-        if alias.contains("workstation") ||
-            alias.contains("mechrevo") ||
-            alias.contains("3050") ||
-            alias.contains("mac") {
+        if combined.contains("gpu") || combined.contains("rtx") || combined.contains("a100") || combined.contains("h100") || combined.contains("4090") || combined.contains("5090") {
+            return "cpu.fill"
+        }
+        if combined.contains("workstation") ||
+            combined.contains("desktop") ||
+            combined.contains("laptop") ||
+            combined.contains("studio") ||
+            combined.contains("mac") {
             return "desktopcomputer"
         }
-        if alias.contains("cloud") || alias.contains("tencent") {
-            return "cloud"
+        if combined.contains("cloud") || combined.contains("vps") || combined.contains("vm") {
+            return "cloud.fill"
         }
         return "server.rack"
     }
@@ -185,7 +247,9 @@ struct StatusBadge: View {
             StatusDot(state: state, size: 7)
             Text(label)
                 .font(.caption.weight(.medium))
+                .lineLimit(1)
         }
+        .fixedSize(horizontal: true, vertical: false)
         .foregroundStyle(AppTheme.statusColor(state))
         .padding(.horizontal, 9)
         .padding(.vertical, 4)
@@ -193,6 +257,25 @@ struct StatusBadge: View {
             Capsule(style: .continuous)
                 .fill(AppTheme.statusColor(state).opacity(0.11))
         )
+    }
+}
+
+struct RouteBadge: View {
+    let route: SSHRouteKind
+    var compact: Bool = false
+
+    var body: some View {
+        Text(compact ? route.shortBadge : route.label)
+            .font(.system(size: compact ? 9.5 : 11, weight: .medium))
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
+            .foregroundStyle(AppTheme.routeColor(route))
+            .padding(.horizontal, compact ? 5 : 8)
+            .padding(.vertical, compact ? 1.5 : 3.5)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(AppTheme.routeColor(route).opacity(0.11))
+            )
     }
 }
 
@@ -204,11 +287,12 @@ struct MeterBar: View {
     var body: some View {
         GeometryReader { geometry in
             let fraction = min(max(value, 0), 1)
+            let effectiveColor = AppTheme.severityColor(fraction: fraction, base: color)
             ZStack(alignment: .leading) {
                 Capsule(style: .continuous)
-                    .fill(color.opacity(0.13))
+                    .fill(effectiveColor.opacity(0.13))
                 Capsule(style: .continuous)
-                    .fill(color)
+                    .fill(effectiveColor)
                     .frame(width: fraction > 0 ? max(geometry.size.width * fraction, 3) : 0)
             }
         }
@@ -223,16 +307,69 @@ struct SectionTitle: View {
     var detail: String?
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
             Text(title)
                 .font(.system(size: 15, weight: .semibold))
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
             if let detail {
                 Text(detail)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+                    .truncationMode(.tail)
             }
-            Spacer()
+            Spacer(minLength: 4)
+        }
+    }
+}
+
+/// Responsive wrapping horizontal layout for action toolbars, badges, and chips.
+struct FlowLayout: Layout {
+    var spacing: CGFloat = 8
+    var lineSpacing: CGFloat = 8
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let maxWidth = proposal.width ?? .infinity
+        var currentX: CGFloat = 0
+        var currentY: CGFloat = 0
+        var lineHeight: CGFloat = 0
+        var totalWidth: CGFloat = 0
+
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            if currentX > 0 && currentX + size.width > maxWidth {
+                currentX = 0
+                currentY += lineHeight + lineSpacing
+                lineHeight = 0
+            }
+            totalWidth = max(totalWidth, currentX + size.width)
+            currentX += size.width + spacing
+            lineHeight = max(lineHeight, size.height)
+        }
+
+        return CGSize(width: proposal.width ?? totalWidth, height: currentY + lineHeight)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var currentX = bounds.minX
+        var currentY = bounds.minY
+        var lineHeight: CGFloat = 0
+
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            if currentX > bounds.minX && currentX + size.width > bounds.maxX {
+                currentX = bounds.minX
+                currentY += lineHeight + lineSpacing
+                lineHeight = 0
+            }
+            subview.place(
+                at: CGPoint(x: currentX, y: currentY),
+                anchor: .topLeading,
+                proposal: ProposedViewSize(size)
+            )
+            currentX += size.width + spacing
+            lineHeight = max(lineHeight, size.height)
         }
     }
 }

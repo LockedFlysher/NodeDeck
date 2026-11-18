@@ -8,14 +8,34 @@ struct HostDetailView: View {
     @State private var didCopyCommand = false
     @State private var slurmFilter = "idle"
 
+    private var mountedItems: [FolderMountItem] {
+        store.mountItems(for: snapshot.host).filter(\.isMounted)
+    }
+
+    private var vscodeItems: [VSCodeWorkspaceItem] {
+        store.vscodeItems(for: snapshot.host)
+    }
+
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
+            VStack(alignment: .leading, spacing: 20) {
                 hostHeader
+
+                if let feedback = store.feedback {
+                    feedbackBanner(feedback)
+                }
 
                 if snapshot.state == .offline {
                     offlineBanner
                 }
+
+                if !store.tunnelItems(for: snapshot.host).isEmpty || store.moonlightTarget(for: snapshot.host) != nil {
+                    TunnelSectionView(snapshot: snapshot)
+                }
+
+                VSCodeSectionView(snapshot: snapshot)
+
+                MountSectionView(snapshot: snapshot)
 
                 if let metrics = snapshot.metrics {
                     metricsSection(metrics)
@@ -29,8 +49,8 @@ struct HostDetailView: View {
                     noMetricsPlaceholder
                 }
             }
-            .padding(.horizontal, 28)
-            .padding(.top, 34)
+            .padding(.horizontal, 24)
+            .padding(.top, 28)
             .padding(.bottom, 32)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -39,16 +59,68 @@ struct HostDetailView: View {
     }
 
     private var hostHeader: some View {
-        HStack(alignment: .top, spacing: 16) {
-            HostAvatar(host: snapshot.host, size: 54)
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .center, spacing: 16) {
+                hostIdentityBlock
+                    .fixedSize(horizontal: true, vertical: false)
 
-            VStack(alignment: .leading, spacing: 7) {
-                Text(snapshot.host.alias)
-                    .font(.system(size: 26, weight: .semibold))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.72)
+                Spacer(minLength: 16)
 
-                HStack(spacing: 7) {
+                HStack(spacing: 8) {
+                    primaryActionButtons
+                    utilityIconButtons
+                }
+                .fixedSize(horizontal: true, vertical: false)
+            }
+
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .top, spacing: 12) {
+                    hostIdentityBlock
+                    Spacer(minLength: 8)
+                    HStack(spacing: 6) {
+                        utilityIconButtons
+                    }
+                    .fixedSize(horizontal: true, vertical: false)
+                }
+
+                FlowLayout(spacing: 8, lineSpacing: 8) {
+                    primaryActionButtons
+                }
+            }
+        }
+    }
+
+    private var hostIdentityBlock: some View {
+        HStack(alignment: .top, spacing: 14) {
+            HostAvatar(host: snapshot.host, size: 52)
+
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(snapshot.host.alias)
+                        .font(.system(size: 23, weight: .semibold))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+
+                    if !snapshot.host.alternateAliases.isEmpty {
+                        Text(snapshot.host.alternateAliases.joined(separator: ", "))
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 2)
+                            .background(
+                                Capsule(style: .continuous)
+                                    .fill(Color(nsColor: .controlBackgroundColor))
+                            )
+                            .overlay(
+                                Capsule(style: .continuous)
+                                    .stroke(AppTheme.subtleBorder, lineWidth: 1)
+                            )
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                }
+
+                HStack(spacing: 6) {
                     Image(systemName: "network")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -57,58 +129,219 @@ struct HostDetailView: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
+                        .textSelection(.enabled)
                 }
 
-                HStack(spacing: 8) {
+                FlowLayout(spacing: 8, lineSpacing: 6) {
                     StatusBadge(state: snapshot.state)
-                    if let latency = snapshot.latencyMilliseconds {
+                    RouteBadge(route: snapshot.host.routeKind)
+                    if let latency = snapshot.latencyMilliseconds, snapshot.state == .online {
                         Label(DisplayFormat.latency(latency), systemImage: "bolt.horizontal")
                             .font(.caption)
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
                             .foregroundStyle(.secondary)
+                            .padding(.vertical, 3)
+                            .help("Estimated SSH round-trip latency")
                     }
                 }
-            }
-            .layoutPriority(1)
-
-            Spacer(minLength: 12)
-
-            HStack(spacing: 8) {
-                Button {
-                    TerminalLauncher.openTerminal(for: snapshot.host)
-                } label: {
-                    Label("Open Terminal", systemImage: "terminal")
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(AppTheme.accent)
-                .help("Run \(snapshot.host.terminalCommand) in Terminal")
-
-                Button {
-                    TerminalLauncher.copyCommand(for: snapshot.host)
-                    didCopyCommand = true
-                    Task {
-                        try? await Task.sleep(nanoseconds: 1_300_000_000)
-                        didCopyCommand = false
-                    }
-                } label: {
-                    Label(
-                        didCopyCommand ? "Copied" : "Copy Command",
-                        systemImage: didCopyCommand ? "checkmark" : "doc.on.doc"
-                    )
-                }
-                .buttonStyle(.bordered)
-                .help("Copy SSH command")
-
-                Button {
-                    store.refresh(alias: snapshot.host.alias)
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                        .frame(width: 18, height: 18)
-                }
-                .buttonStyle(.bordered)
-                .disabled(store.isRefreshing || snapshot.state == .checking)
-                .help("Refresh this host")
             }
         }
+    }
+
+    @ViewBuilder
+    private var primaryActionButtons: some View {
+        Button {
+            store.openSSHInTerminal(for: snapshot.host)
+        } label: {
+            Label("Open Terminal", systemImage: "terminal")
+                .lineLimit(1)
+        }
+        .buttonStyle(.borderedProminent)
+        .tint(AppTheme.accent)
+        .fixedSize(horizontal: true, vertical: false)
+        .help("Run \(snapshot.host.terminalCommand) in Terminal (⌘↩)")
+
+        vscodeQuickButton
+
+        if store.hasMoonlightTunnel(for: snapshot.host) {
+            Button {
+                store.launchMoonlightDesktop(for: snapshot.host)
+            } label: {
+                Label("Moonlight", systemImage: "play.display")
+                    .lineLimit(1)
+            }
+            .buttonStyle(.bordered)
+            .fixedSize(horizontal: true, vertical: false)
+            .help("Stream remote desktop in Moonlight (⇧⌘D)")
+        }
+
+        folderQuickButton
+
+        Button {
+            TerminalLauncher.copyCommand(for: snapshot.host)
+            didCopyCommand = true
+            Task {
+                try? await Task.sleep(nanoseconds: 1_300_000_000)
+                didCopyCommand = false
+            }
+        } label: {
+            Label(
+                didCopyCommand ? "Copied" : "Copy SSH",
+                systemImage: didCopyCommand ? "checkmark" : "doc.on.doc"
+            )
+            .lineLimit(1)
+        }
+        .buttonStyle(.bordered)
+        .fixedSize(horizontal: true, vertical: false)
+        .help("Copy SSH command (⇧⌘C)")
+    }
+
+    @ViewBuilder
+    private var utilityIconButtons: some View {
+        Button {
+            store.togglePin(snapshot.host.alias)
+        } label: {
+            Image(systemName: store.isPinned(snapshot.host.alias) ? "pin.fill" : "pin")
+                .foregroundStyle(store.isPinned(snapshot.host.alias) ? AppTheme.accent : .secondary)
+                .frame(width: 18, height: 18)
+        }
+        .buttonStyle(.bordered)
+        .help(store.isPinned(snapshot.host.alias) ? "Unpin host" : "Pin host to top of sidebar")
+
+        Button {
+            store.refresh(alias: snapshot.host.alias)
+        } label: {
+            Image(systemName: "arrow.clockwise")
+                .frame(width: 18, height: 18)
+        }
+        .buttonStyle(.bordered)
+        .disabled(snapshot.state == .checking)
+        .help("Refresh this host")
+    }
+
+    @ViewBuilder
+    private var vscodeQuickButton: some View {
+        let openCount = vscodeItems.filter(\.isOpenInWindow).count
+        if vscodeItems.isEmpty {
+            Button {
+                store.presentOpenVSCodePath(for: snapshot.host)
+            } label: {
+                Label("VS Code", systemImage: "chevron.left.forwardslash.chevron.right")
+                    .lineLimit(1)
+            }
+            .buttonStyle(.bordered)
+            .fixedSize(horizontal: true, vertical: false)
+            .disabled(!store.isVSCodeInstalled)
+            .help("Connect & open workspace in VS Code (⇧⌘V)")
+        } else {
+            Menu {
+                ForEach(vscodeItems) { item in
+                    let statusTag = item.isLastActive ? " [Focused]" : (item.isOpenInWindow ? " [Open]" : "")
+                    Button("\(item.name)\(statusTag)  (\(item.remotePath))") {
+                        store.openVSCodeWorkspace(item, for: snapshot.host)
+                    }
+                }
+                Divider()
+                Button("Open Another Remote Folder…") {
+                    store.presentOpenVSCodePath(for: snapshot.host)
+                }
+                Button("Connect Empty VS Code Window") {
+                    store.openVSCodeEmptyWindow(for: snapshot.host)
+                }
+            } label: {
+                Label(
+                    openCount > 0 ? "VS Code (\(openCount))" : "VS Code",
+                    systemImage: "chevron.left.forwardslash.chevron.right"
+                )
+            }
+            .menuStyle(.borderedButton)
+            .fixedSize()
+            .disabled(!store.isVSCodeInstalled)
+            .help("Open or switch VS Code workspace on \(snapshot.host.alias) (⇧⌘V)")
+        }
+    }
+
+    @ViewBuilder
+    private var folderQuickButton: some View {
+        if mountedItems.count == 1, let only = mountedItems.first {
+            Button {
+                store.openMountInFinder(only)
+            } label: {
+                Label("Open Folder", systemImage: "folder")
+                    .lineLimit(1)
+            }
+            .buttonStyle(.bordered)
+            .fixedSize(horizontal: true, vertical: false)
+            .help("Open \(only.displayLocalPath) in Finder (⇧⌘O)")
+        } else if mountedItems.count > 1 {
+            Menu {
+                ForEach(mountedItems) { item in
+                    Button("Open \(item.label) (\(item.displayLocalPath))") {
+                        store.openMountInFinder(item)
+                    }
+                }
+                Divider()
+                Button("Add Another Mount…") {
+                    store.presentAddMount(for: snapshot.host)
+                }
+            } label: {
+                Label("Folders (\(mountedItems.count))", systemImage: "folder")
+                    .lineLimit(1)
+            }
+            .menuStyle(.borderedButton)
+            .fixedSize()
+        } else {
+            Button {
+                store.openPrimaryMountOrComposer(for: snapshot.host)
+            } label: {
+                Label("Mount Folder", systemImage: "externaldrive.badge.plus")
+                    .lineLimit(1)
+            }
+            .buttonStyle(.bordered)
+            .fixedSize(horizontal: true, vertical: false)
+            .help("Mount a remote folder into Finder (⇧⌘M)")
+        }
+    }
+
+    private func feedbackBanner(_ feedback: ActionFeedback) -> some View {
+        let color: Color = switch feedback.kind {
+        case .info: AppTheme.disk
+        case .success: AppTheme.statusColor(.online)
+        case .error: AppTheme.critical
+        }
+        let icon: String = switch feedback.kind {
+        case .info: "info.circle.fill"
+        case .success: "checkmark.circle.fill"
+        case .error: "exclamationmark.triangle.fill"
+        }
+
+        return HStack(spacing: 9) {
+            Image(systemName: icon)
+                .foregroundStyle(color)
+            Text(feedback.message)
+                .font(.caption.weight(.medium))
+                .lineLimit(2)
+            Spacer()
+            Button {
+                store.dismissFeedback()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.borderless)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(color.opacity(0.09))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(color.opacity(0.22), lineWidth: 1)
+        )
     }
 
     private var offlineBanner: some View {
@@ -126,12 +359,17 @@ struct HostDetailView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(3)
                 if let lastUpdated = snapshot.lastUpdated {
-                    Text("Showing the last successful data from \(DisplayFormat.time(lastUpdated))")
+                    Text("Showing cached metrics from \(DisplayFormat.time(lastUpdated))")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                 }
             }
             Spacer()
+            Button("Retry") {
+                store.refresh(alias: snapshot.host.alias)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
         }
         .padding(12)
         .background(
@@ -152,7 +390,7 @@ struct HostDetailView: View {
             )
 
             LazyVGrid(
-                columns: Array(repeating: GridItem(.flexible(minimum: 126), spacing: 10), count: 4),
+                columns: [GridItem(.adaptive(minimum: 175), spacing: 10)],
                 spacing: 10
             ) {
                 MetricTile(
@@ -174,9 +412,9 @@ struct HostDetailView: View {
                 )
 
                 MetricTile(
-                    title: "Disk",
+                    title: "Disk (/)",
                     value: DisplayFormat.percent(metrics.diskFraction),
-                    subtitle: "\(DisplayFormat.bytes(metrics.diskUsed)) / \(DisplayFormat.bytes(metrics.diskTotal))",
+                    subtitle: "\(DisplayFormat.bytes(metrics.diskAvailable)) free of \(DisplayFormat.bytes(metrics.diskTotal))",
                     fraction: metrics.diskFraction,
                     color: AppTheme.disk,
                     symbol: "internaldrive"
@@ -200,7 +438,7 @@ struct HostDetailView: View {
     private func gpuSection(_ metrics: HostMetrics) -> some View {
         if !metrics.gpus.isEmpty {
             VStack(alignment: .leading, spacing: 10) {
-                SectionTitle(title: "GPU", detail: "\(metrics.gpus.count) devices")
+                SectionTitle(title: "GPU Accelerators", detail: "\(metrics.gpus.count) device(s)")
 
                 VStack(spacing: 0) {
                     ForEach(Array(metrics.gpus.enumerated()), id: \.element.id) { index, gpu in
@@ -220,24 +458,41 @@ struct HostDetailView: View {
     private func slurmSection(_ metrics: HostMetrics) -> some View {
         if let slurm = metrics.slurm {
             VStack(alignment: .leading, spacing: 10) {
-                HStack(alignment: .center, spacing: 12) {
-                    SectionTitle(
-                        title: "Slurm Cluster",
-                        detail: "\(slurm.nodes.count) nodes · \(slurm.idleNodeCount) idle · \(slurm.occupiedNodeCount) occupied"
-                    )
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .center, spacing: 12) {
+                        SectionTitle(
+                            title: "Slurm Cluster",
+                            detail: "\(slurm.nodes.count) nodes · \(slurm.idleNodeCount) idle · \(slurm.occupiedNodeCount) occupied"
+                        )
 
-                    SlurmFilterControl(
-                        selection: $slurmFilter,
-                        idleCount: slurm.idleNodeCount,
-                        allocatedCount: slurm.allocatedNodeCount,
-                        mixedCount: slurm.mixedNodeCount,
-                        totalCount: slurm.nodes.count
-                    )
-                    .frame(width: 340)
+                        SlurmFilterControl(
+                            selection: $slurmFilter,
+                            idleCount: slurm.idleNodeCount,
+                            allocatedCount: slurm.allocatedNodeCount,
+                            mixedCount: slurm.mixedNodeCount,
+                            totalCount: slurm.nodes.count
+                        )
+                        .frame(width: 320)
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        SectionTitle(
+                            title: "Slurm Cluster",
+                            detail: "\(slurm.nodes.count) nodes · \(slurm.idleNodeCount) idle · \(slurm.occupiedNodeCount) occupied"
+                        )
+
+                        SlurmFilterControl(
+                            selection: $slurmFilter,
+                            idleCount: slurm.idleNodeCount,
+                            allocatedCount: slurm.allocatedNodeCount,
+                            mixedCount: slurm.mixedNodeCount,
+                            totalCount: slurm.nodes.count
+                        )
+                    }
                 }
 
                 LazyVGrid(
-                    columns: Array(repeating: GridItem(.flexible(minimum: 108), spacing: 10), count: 4),
+                    columns: [GridItem(.adaptive(minimum: 165), spacing: 10)],
                     spacing: 10
                 ) {
                     SlurmSummaryTile(
@@ -393,11 +648,15 @@ struct HostDetailView: View {
     }
 
     private func informationSection(_ metrics: HostMetrics) -> some View {
-        HStack(alignment: .top, spacing: 12) {
+        LazyVGrid(
+            columns: [GridItem(.adaptive(minimum: 270), spacing: 12)],
+            alignment: .leading,
+            spacing: 12
+        ) {
             InfoPanel(
                 title: "Connection",
                 rows: [
-                    InfoRowData(label: "Alias", value: snapshot.host.alias, monospaced: true),
+                    InfoRowData(label: "Alias", value: snapshot.host.allAliases.joined(separator: ", "), monospaced: true),
                     InfoRowData(label: "Host", value: snapshot.host.hostName, monospaced: true),
                     InfoRowData(label: "User", value: snapshot.host.user, monospaced: true),
                     InfoRowData(label: "Port", value: "\(snapshot.host.port)", monospaced: true),
@@ -464,7 +723,7 @@ struct HostDetailView: View {
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 80)
+        .padding(.vertical, 60)
     }
 
     private var noMetricsPlaceholder: some View {
@@ -481,7 +740,7 @@ struct HostDetailView: View {
             .buttonStyle(.bordered)
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 70)
+        .padding(.vertical, 54)
     }
 }
 
@@ -624,11 +883,12 @@ private struct MetricTile: View {
     let symbol: String
 
     var body: some View {
+        let effectiveColor = AppTheme.severityColor(fraction: fraction, base: color)
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 6) {
                 Image(systemName: symbol)
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(color)
+                    .foregroundStyle(effectiveColor)
                 Text(title)
                     .font(.caption.weight(.medium))
                     .foregroundStyle(.secondary)
@@ -657,23 +917,42 @@ private struct MetricTile: View {
 private struct GPURow: View {
     let gpu: GPUInfo
 
+    private var accentColor: Color {
+        gpu.isAMD ? AppTheme.amdGPU : AppTheme.cpu
+    }
+
     var body: some View {
         HStack(spacing: 14) {
-            Image(systemName: "rectangle.stack.fill")
+            Image(systemName: gpu.isAMD ? "cpu" : "rectangle.stack.fill")
                 .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(AppTheme.cpu)
+                .foregroundStyle(accentColor)
                 .frame(width: 26)
 
             VStack(alignment: .leading, spacing: 6) {
-                Text(gpu.name)
-                    .font(.system(size: 12, weight: .medium))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                HStack(spacing: 7) {
+                    Text(gpu.name)
+                        .font(.system(size: 12, weight: .medium))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+
+                    if gpu.isSleeping {
+                        Text("D3 Sleep")
+                            .font(.system(size: 9.5, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 1.5)
+                            .background(
+                                Capsule(style: .continuous)
+                                    .fill(Color(nsColor: .quaternaryLabelColor).opacity(0.4))
+                            )
+                            .help("GPU is in PCIe runtime D3cold power-saving mode")
+                    }
+                }
 
                 if let fraction = gpu.memoryFraction {
                     HStack(spacing: 8) {
-                        MeterBar(value: fraction, color: AppTheme.cpu, height: 4)
-                        Text("\(Int(gpu.memoryUsedMB ?? 0)) / \(Int(gpu.memoryTotalMB ?? 0)) MB")
+                        MeterBar(value: fraction, color: accentColor, height: 4)
+                        Text(DisplayFormat.vram(usedMB: gpu.memoryUsedMB, totalMB: gpu.memoryTotalMB))
                             .font(.caption2.monospacedDigit())
                             .foregroundStyle(.secondary)
                             .fixedSize()
@@ -683,27 +962,42 @@ private struct GPURow: View {
 
             Spacer(minLength: 8)
 
-            if let utilization = gpu.utilization {
-                Text("\(Int(utilization))%")
-                    .font(.system(size: 14, weight: .semibold, design: .rounded))
-                    .monospacedDigit()
-                    .foregroundStyle(AppTheme.cpu)
-                    .frame(width: 44, alignment: .trailing)
-            }
+            HStack(spacing: 8) {
+                if let utilization = gpu.utilization {
+                    Text("\(Int(utilization))%")
+                        .font(.system(size: 14, weight: .semibold, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(accentColor)
+                        .frame(minWidth: 38, alignment: .trailing)
+                }
 
-            if let temperature = gpu.temperatureC {
-                Label("\(Int(temperature))°", systemImage: "thermometer.medium")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .frame(width: 50, alignment: .trailing)
-            }
+                if let temperature = gpu.temperatureC {
+                    let tempColor: Color = temperature >= 82 ? AppTheme.critical : (temperature >= 72 ? AppTheme.warning : .secondary)
+                    Label("\(Int(temperature))°", systemImage: "thermometer.medium")
+                        .font(.caption)
+                        .lineLimit(1)
+                        .foregroundStyle(tempColor)
+                } else if gpu.isSleeping {
+                    Text("Idle")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
 
-            if let power = gpu.powerW {
-                Text("\(Int(power)) W")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .frame(width: 48, alignment: .trailing)
+                if let power = gpu.powerW {
+                    Text("\(Int(power)) W")
+                        .font(.caption.monospacedDigit())
+                        .lineLimit(1)
+                        .foregroundStyle(.secondary)
+                        .frame(minWidth: 42, alignment: .trailing)
+                } else if gpu.isSleeping {
+                    Text("0 W")
+                        .font(.caption.monospacedDigit())
+                        .lineLimit(1)
+                        .foregroundStyle(.tertiary)
+                        .frame(minWidth: 42, alignment: .trailing)
+                }
             }
+            .fixedSize(horizontal: true, vertical: false)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
@@ -728,7 +1022,7 @@ private struct InfoPanel: View {
                     Text(row.label)
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                        .frame(width: 58, alignment: .leading)
+                        .frame(width: 60, alignment: .leading)
                     Text(row.value)
                         .font(row.monospaced ? .system(size: 11.5, design: .monospaced) : .system(size: 12))
                         .lineLimit(2)
@@ -741,12 +1035,12 @@ private struct InfoPanel: View {
 
                 if index < rows.count - 1 {
                     Divider()
-                        .padding(.leading, 82)
+                        .padding(.leading, 84)
                 }
             }
         }
         .padding(.bottom, 7)
-        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .cardBackground()
     }
 }

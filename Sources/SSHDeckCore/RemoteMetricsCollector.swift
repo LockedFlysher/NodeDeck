@@ -12,6 +12,7 @@ public enum RemoteMetricsCollector {
                 arguments: [
                     "-T",
                     "-o", "BatchMode=yes",
+                    "-o", "ControlMaster=no",
                     "-o", "ConnectTimeout=5",
                     "-o", "ConnectionAttempts=1",
                     "-o", "ServerAliveInterval=4",
@@ -24,20 +25,22 @@ public enum RemoteMetricsCollector {
                 input: metricsScript,
                 timeout: timeout
             )
-            let elapsed = Date().timeIntervalSince(startedAt) * 1_000
+            let totalElapsedMs = Date().timeIntervalSince(startedAt) * 1_000
 
             if result.timedOut {
                 return HostProbeResult(
                     metrics: nil,
-                    latencyMilliseconds: elapsed,
+                    latencyMilliseconds: totalElapsedMs,
                     errorMessage: "Connection timed out"
                 )
             }
 
             if let metrics = RemoteMetricsParser.parse(result.stdout) {
+                let scriptMs = metrics.scriptDurationMilliseconds ?? 0
+                let effectiveRTT = max(1, totalElapsedMs - scriptMs)
                 return HostProbeResult(
                     metrics: metrics,
-                    latencyMilliseconds: elapsed,
+                    latencyMilliseconds: effectiveRTT,
                     errorMessage: nil
                 )
             }
@@ -45,7 +48,7 @@ public enum RemoteMetricsCollector {
             let error = meaningfulError(from: result.stderr)
             return HostProbeResult(
                 metrics: nil,
-                latencyMilliseconds: elapsed,
+                latencyMilliseconds: totalElapsedMs,
                 errorMessage: error ?? "Remote metrics collection failed"
             )
         }.value
@@ -64,7 +67,7 @@ public enum RemoteMetricsCollector {
                  last.localizedCaseInsensitiveContains("connection timed out"):
                 localized = "Connection timed out"
             case last.localizedCaseInsensitiveContains("connection refused"):
-                localized = "Connection refused"
+                localized = "Connection refused (check tunnel or sshd)"
             case last.localizedCaseInsensitiveContains("permission denied"):
                 localized = "Authentication failed or permission denied"
             case last.localizedCaseInsensitiveContains("no route to host"),
@@ -75,7 +78,7 @@ public enum RemoteMetricsCollector {
             case last.localizedCaseInsensitiveContains("host key verification failed"):
                 localized = "Host key verification failed"
             case last.localizedCaseInsensitiveContains("connection closed"):
-                localized = "Connection closed"
+                localized = "Connection closed by remote"
             default:
                 localized = last
             }
@@ -90,17 +93,26 @@ public enum RemoteMetricsCollector {
 
     static let metricsScript = #"""
 printf 'SSHDECK_BEGIN\n'
+t_start=$(awk '{print $1}' /proc/uptime 2>/dev/null)
 printf 'HOSTNAME=%s\n' "$(hostname 2>/dev/null)"
-printf 'OS=%s\n' "$(. /etc/os-release 2>/dev/null; printf '%s' "${PRETTY_NAME:-${NAME:-Linux}}")"
+printf 'OS=%s\n' "$(. /etc/os-release 2>/dev/null; printf '%s' "${PRETTY_NAME:-${NAME:-$(uname -s 2>/dev/null || printf Linux)}}")"
 printf 'KERNEL=%s\n' "$(uname -sr 2>/dev/null)"
 printf 'ARCH=%s\n' "$(uname -m 2>/dev/null)"
 printf 'USER=%s\n' "$(id -un 2>/dev/null)"
+printf 'HOME_DIR=%s\n' "${HOME:-}"
+if [ -n "${HOME:-}" ]; then
+  for cand in project projects PycharmProjects workspace code server Documents Downloads; do
+    if [ -d "$HOME/$cand" ]; then
+      printf 'CANDIDATE_DIR=%s/%s\n' "$HOME" "$cand"
+    fi
+  done
+fi
 printf 'CPU_MODEL=%s\n' "$(awk -F: '/model name|Model/ {gsub(/^ +/, "", $2); print $2; exit}' /proc/cpuinfo 2>/dev/null)"
 printf 'CPU_CORES=%s\n' "$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || printf 0)"
 set -- $(awk '/^cpu / {print $2,$3,$4,$5,$6,$7,$8,$9; exit}' /proc/stat 2>/dev/null)
 cpu_total_1=$(( ${1:-0} + ${2:-0} + ${3:-0} + ${4:-0} + ${5:-0} + ${6:-0} + ${7:-0} + ${8:-0} ))
 cpu_idle_1=$(( ${4:-0} + ${5:-0} ))
-sleep 0.35
+sleep 0.25 2>/dev/null || sleep 1
 set -- $(awk '/^cpu / {print $2,$3,$4,$5,$6,$7,$8,$9; exit}' /proc/stat 2>/dev/null)
 cpu_total_2=$(( ${1:-0} + ${2:-0} + ${3:-0} + ${4:-0} + ${5:-0} + ${6:-0} + ${7:-0} + ${8:-0} ))
 cpu_idle_2=$(( ${4:-0} + ${5:-0} ))
@@ -124,16 +136,63 @@ printf 'SWAP_FREE=%s\n' "$(( ${swap_free_kb:-0} * 1024 ))"
 df -Pk / 2>/dev/null | awk 'NR==2 {printf "DISK_TOTAL=%d\nDISK_USED=%d\nDISK_AVAILABLE=%d\n", $2*1024, $3*1024, $4*1024}'
 if command -v nvidia-smi >/dev/null 2>&1; then
   nvidia-smi --query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw --format=csv,noheader,nounits 2>/dev/null | while IFS= read -r gpu_line; do
-    printf 'GPU=%s\n' "$gpu_line"
+    [ -n "$gpu_line" ] && printf 'GPU=%s, active\n' "$gpu_line"
   done
 fi
+for card_dev in /sys/class/drm/card[0-9]*/device; do
+  [ -f "$card_dev/vendor" ] || continue
+  vendor=$(cat "$card_dev/vendor" 2>/dev/null)
+  [ "$vendor" = "0x1002" ] || continue
+  dev_id=$(cat "$card_dev/device" 2>/dev/null | tr 'A-F' 'a-f')
+  slot=$(awk -F= '/^PCI_SLOT_NAME=/ {print $2}' "$card_dev/uevent" 2>/dev/null)
+  gpu_name=$(cat "$card_dev/product_name" 2>/dev/null)
+  if [ -z "$gpu_name" ] && [ -n "$slot" ] && command -v lspci >/dev/null 2>&1; then
+    pci_desc=$(lspci -s "${slot#0000:}" 2>/dev/null | sed 's/^[^:]*: [^:]*: //')
+    bracket=$(printf '%s' "$pci_desc" | sed -n 's/.*\[\(Radeon[^]]*\)\].*/AMD \1/p')
+    [ -n "$bracket" ] && gpu_name="$bracket"
+  fi
+  if [ -z "$gpu_name" ]; then
+    case "$dev_id" in
+      0x7590) gpu_name="AMD Radeon RX 9060 XT" ;;
+      0x7550) gpu_name="AMD Radeon RX 9070 XT" ;;
+      0x7551) gpu_name="AMD Radeon RX 9070" ;;
+      0x744c) gpu_name="AMD Radeon RX 7900 XTX" ;;
+      0x7448) gpu_name="AMD Radeon PRO W7900" ;;
+      0x747e) gpu_name="AMD Radeon RX 7800 XT" ;;
+      0x7480) gpu_name="AMD Radeon RX 7700 XT" ;;
+      *) gpu_name="AMD Radeon GPU ($dev_id)" ;;
+    esac
+  fi
+  pstate=$(cat "$card_dev/power/runtime_status" 2>/dev/null)
+  util=$(cat "$card_dev/gpu_busy_percent" 2>/dev/null)
+  if [ -z "$util" ] && [ "$pstate" = "suspended" ]; then
+    util="0"
+  fi
+  vram_used=""
+  vram_total=""
+  [ -f "$card_dev/mem_info_vram_used" ] && vram_used=$(awk '{printf "%.0f", $1/1048576}' "$card_dev/mem_info_vram_used" 2>/dev/null)
+  [ -f "$card_dev/mem_info_vram_total" ] && vram_total=$(awk '{printf "%.0f", $1/1048576}' "$card_dev/mem_info_vram_total" 2>/dev/null)
+  temp=""
+  pwr=""
+  for hm in "$card_dev"/hwmon/hwmon*; do
+    [ -d "$hm" ] || continue
+    t_raw=$(cat "$hm/temp1_input" 2>/dev/null)
+    [ -n "$t_raw" ] && temp=$(awk -v v="$t_raw" 'BEGIN {printf "%.0f", v/1000}')
+    p_raw=$(cat "$hm/power1_average" 2>/dev/null || cat "$hm/power1_input" 2>/dev/null)
+    [ -n "$p_raw" ] && pwr=$(awk -v v="$p_raw" 'BEGIN {printf "%.1f", v/1000000}')
+    break
+  done
+  printf 'GPU=%s, %s, %s, %s, %s, %s, %s\n' "$gpu_name" "${util:-N/A}" "${vram_used:-N/A}" "${vram_total:-N/A}" "${temp:-N/A}" "${pwr:-N/A}" "${pstate:-active}"
+done
 if command -v sinfo >/dev/null 2>&1; then
   printf 'SLURM=1\n'
   sinfo -h -N -o '%N|%P|%T|%C|%m|%G|%f' 2>/dev/null | awk -F'|' '{ nodes[$1]=$0 } END { for (node in nodes) print "SLURM_NODE=" nodes[node] }'
 fi
-ps -eo comm=,pcpu=,pmem= --sort=-pcpu 2>/dev/null | head -n 5 | while read -r process_name process_cpu process_mem; do
-  printf 'PROC=%s|%s|%s\n' "$process_name" "$process_cpu" "$process_mem"
-done
+ps -eo comm=,pcpu=,pmem= --sort=-pcpu 2>/dev/null | head -n 5 | awk 'NF >= 3 { mem=$NF; cpu=$(NF-1); $NF=""; $(NF-1)=""; sub(/^[[:space:]]+/, ""); sub(/[[:space:]]+$/, ""); printf "PROC=%s|%s|%s\n", $0, cpu, mem }'
+t_end=$(awk '{print $1}' /proc/uptime 2>/dev/null)
+if [ -n "$t_start" ] && [ -n "$t_end" ]; then
+  awk -v s="$t_start" -v e="$t_end" 'BEGIN { d=(e-s)*1000; if (d >= 0) printf "SCRIPT_MS=%.1f\n", d }'
+fi
 printf 'SSHDECK_END\n'
 """#
 }
@@ -148,6 +207,7 @@ public enum RemoteMetricsParser {
         var gpuLines: [String] = []
         var processLines: [String] = []
         var slurmNodeLines: [String] = []
+        var candidateDirs: [String] = []
 
         for rawLine in output.split(whereSeparator: \.isNewline) {
             let line = String(rawLine)
@@ -162,6 +222,10 @@ public enum RemoteMetricsParser {
                 processLines.append(value)
             case "SLURM_NODE":
                 slurmNodeLines.append(value)
+            case "CANDIDATE_DIR":
+                if !value.isEmpty {
+                    candidateDirs.append(value)
+                }
             default:
                 values[key] = value
             }
@@ -182,6 +246,8 @@ public enum RemoteMetricsParser {
             kernel: values["KERNEL"] ?? "",
             architecture: values["ARCH"] ?? "",
             user: values["USER"] ?? "",
+            homeDirectory: values["HOME_DIR"] ?? "",
+            candidateDirectories: candidateDirs,
             cpuModel: values["CPU_MODEL"] ?? "",
             cpuCores: Int(values["CPU_CORES"] ?? "") ?? 0,
             cpuUsage: Double(values["CPU_USAGE"] ?? "") ?? 0,
@@ -199,6 +265,7 @@ public enum RemoteMetricsParser {
             gpus: gpuLines.compactMap(parseGPU),
             processes: processLines.compactMap(parseProcess),
             slurm: slurm,
+            scriptDurationMilliseconds: Double(values["SCRIPT_MS"] ?? ""),
             capturedAt: capturedAt
         )
     }
@@ -215,13 +282,17 @@ public enum RemoteMetricsParser {
             return Double(value)
         }
 
+        let stateField = fields.indices.contains(6) ? fields[6].lowercased() : ""
+        let isSleeping = stateField == "suspended"
+
         return GPUInfo(
             name: name,
             utilization: number(at: 1),
             memoryUsedMB: number(at: 2),
             memoryTotalMB: number(at: 3),
             temperatureC: number(at: 4),
-            powerW: number(at: 5)
+            powerW: number(at: 5),
+            isSleeping: isSleeping
         )
     }
 

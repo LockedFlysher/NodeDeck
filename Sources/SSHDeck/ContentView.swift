@@ -4,16 +4,24 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject private var store: HostMonitor
     @State private var searchText = ""
+    @FocusState private var searchFocused: Bool
 
     var body: some View {
         HSplitView {
-            SidebarView(searchText: $searchText)
-                .frame(minWidth: 280, idealWidth: 308, maxWidth: 360)
+            SidebarView(searchText: $searchText, searchFocused: $searchFocused)
+                .frame(minWidth: 236, idealWidth: 286, maxWidth: 360)
 
             DetailPane(searchText: searchText)
-                .frame(minWidth: 620)
+                .frame(minWidth: 460)
         }
         .background(Color(nsColor: .windowBackgroundColor))
+        .background(
+            Button("") {
+                searchFocused = true
+            }
+            .keyboardShortcut("f", modifiers: .command)
+            .hidden()
+        )
         .onAppear {
             store.start()
         }
@@ -25,12 +33,7 @@ private struct DetailPane: View {
     let searchText: String
 
     private var filteredHosts: [SSHHost] {
-        guard !searchText.isEmpty else { return store.hosts }
-        return store.hosts.filter {
-            $0.alias.localizedCaseInsensitiveContains(searchText) ||
-                $0.hostName.localizedCaseInsensitiveContains(searchText) ||
-                $0.user.localizedCaseInsensitiveContains(searchText)
-        }
+        store.sortedHosts(matching: searchText)
     }
 
     private var visibleSnapshot: HostSnapshot? {
@@ -66,8 +69,12 @@ private struct DetailPane: View {
                 EmptyStateView(
                     symbol: "magnifyingglass",
                     title: "No matching hosts",
-                    message: nil,
-                    showsProgress: false
+                    message: store.sidebarFilter != .all
+                        ? "No hosts match the \"\(store.sidebarFilter.rawValue)\" filter."
+                        : nil,
+                    showsProgress: false,
+                    actionTitle: store.sidebarFilter != .all ? "Show All Hosts" : nil,
+                    action: store.sidebarFilter != .all ? { store.sidebarFilter = .all } : nil
                 )
             }
         }

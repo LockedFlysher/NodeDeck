@@ -9,15 +9,18 @@ SSH Deck is a native macOS dashboard for the hosts you already manage in OpenSSH
 
 ## Highlights
 
-- Discovers concrete `Host` entries from `~/.ssh/config`, including `Include` files
-- Resolves the effective hostname, user, port, identity file, jump host, and local forwards with `ssh -G`
-- Shows CPU, memory, swap, disk, load, uptime, and SSH round-trip time
-- Shows NVIDIA GPU utilization, memory, temperature, and power
+- Discovers concrete `Host` entries from `~/.ssh/config`, including `Include` files and grouped multi-alias lines
+- Resolves the effective hostname, user, port, identity file, jump host, local forwards, and route type (`Local Tunnel`, `LAN Direct`, `Remote`) concurrently with `ssh -G`
+- Streams live host probe results as each host responds instead of blocking on slow or offline nodes
+- Discovers **VS Code Remote-SSH workspaces** (`storage.json` + `workspaceStorage`) per host — distinguishing **Focused / Open in VS Code** active windows from recent workspaces — with one-click window switching, custom remote folder opening (`⇧⌘V`), and Finder mount integration
+- Integrates native macOS directory mounting (`rclone nfsmount` over SFTP/SSH without macFUSE or `sudo`, plus external SMB/NFS mount detection) with one-click Finder, Terminal, and background auto-mount support
+- Built-in **GOST QUIC + Direct LAN UDP Tunnel Manager** (`~/Library/Application Support/SSHDeck/tunnels.json`) that starts tunnels automatically with SSH Deck, pairs QUIC TCP control channels with sub-millisecond native POSIX UDP media relays (`udp-direct://`), monitors health/ports, and cleanly terminates child `gost` processes when SSH Deck quits
+- Native **macOS Menu Bar resident icon** (`NSStatusItem` + `NSPopover`) with live active-tunnel badge, quick tunnel switches, one-click **Moonlight NVENC** remote desktop launch (`⇧⌘D`), VS Code & Finder shortcuts, and **Launch at Login** toggle (`--background` silent startup; closing the main window via `×` or `⌘W` hides the Dock icon cleanly into the Menu Bar)
+- Shows CPU, memory, swap, disk (including free capacity), load, uptime, and true SSH round-trip latency
+- Shows NVIDIA & AMD GPU utilization, VRAM in GB, temperature warnings, and power
 - Shows the top remote processes by CPU usage
 - Detects Slurm with `sinfo` and summarizes idle, fully allocated, and partially used nodes
-- Filters Slurm nodes and shows free CPUs, memory, GPU type, and partition
-- Opens a host in Terminal or copies its SSH command
-- Supports manual refresh and 15-second to 5-minute auto-refresh intervals
+- Filters hosts (`All`, `Online`, `Mounted`, `GPU`), pins favorite hosts, and supports context menus and keyboard shortcuts (`⌘R`, `⇧⌘R`, `⌘F`, `⌘↩`, `⇧⌘O`, `⇧⌘M`)
 - Keeps the last successful metrics when a host goes offline
 
 ## Requirements
@@ -67,7 +70,7 @@ artifacts/SSHDeck-macos-universal.zip
 SSH Deck is read-only with respect to SSH configuration. It uses your existing aliases, for example:
 
 ```sshconfig
-Host workstation-x830
+Host gpu-workstation
   HostName 203.0.113.10
   Port 6051
   User example
