@@ -133,6 +133,12 @@ private final class MoonlightMediaPipeline: @unchecked Sendable {
     }
 
     func handleSubmitDecodeUnit(_ duPtr: PDECODE_UNIT?) -> Int32 {
+        autoreleasepool {
+            handleSubmitDecodeUnitBody(duPtr)
+        }
+    }
+
+    private func handleSubmitDecodeUnitBody(_ duPtr: PDECODE_UNIT?) -> Int32 {
         guard let du = duPtr?.pointee else { return Int32(DR_OK) }
 
         renderLock.lock()
@@ -478,6 +484,12 @@ private final class MoonlightMediaPipeline: @unchecked Sendable {
     }
 
     func handleAudioDecodeAndPlay(_ sampleData: UnsafeMutablePointer<CChar>?, length: Int32) {
+        autoreleasepool {
+            handleAudioDecodeAndPlayBody(sampleData, length: length)
+        }
+    }
+
+    private func handleAudioDecodeAndPlayBody(_ sampleData: UnsafeMutablePointer<CChar>?, length: Int32) {
         guard let sampleData, length > 0 else { return }
 
         renderLock.lock()
@@ -588,6 +600,7 @@ final class MoonlightStreamSession: ObservableObject {
     private var lastRemoteText: String?
     private var hasInitializedRemoteClipboardBaseline = false
     private var isClipboardSyncInFlight = false
+    private var isStreamWindowKey = true
     var canSyncClipboard: Bool { !(sshHostAlias ?? "").isEmpty }
 
     init() {
@@ -772,6 +785,7 @@ final class MoonlightStreamSession: ObservableObject {
     }
 
     func handleWindowDidBecomeKey() {
+        isStreamWindowKey = true
         guard clipboardAutoSync, state == .streaming, let alias = sshHostAlias, !alias.isEmpty else { return }
         Task {
             await syncMacClipboardIfChanged(to: alias, forceIfUnsynced: true)
@@ -779,6 +793,7 @@ final class MoonlightStreamSession: ObservableObject {
     }
 
     func handleWindowDidResignKey() {
+        isStreamWindowKey = false
         guard clipboardAutoSync, state == .streaming, let alias = sshHostAlias, !alias.isEmpty else { return }
         Task {
             await syncRemoteClipboardIfChanged(from: alias)
@@ -855,12 +870,18 @@ final class MoonlightStreamSession: ObservableObject {
             if self.state == .streaming {
                 await self.syncMacClipboardIfChanged(to: alias, forceIfUnsynced: true)
             }
+            var tick = 0
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 850_000_000)
+                try? await Task.sleep(nanoseconds: 800_000_000)
                 guard !Task.isCancelled, self.state == .streaming, self.clipboardAutoSync else { continue }
+                // Local-only NSPasteboard changeCount check (0 syscalls unless user actually copied on Mac)
                 await self.syncMacClipboardIfChanged(to: alias)
-                guard !Task.isCancelled, self.state == .streaming, self.clipboardAutoSync else { continue }
-                await self.syncRemoteClipboardIfChanged(from: alias)
+                tick += 1
+                // Pull remote clipboard every ~2.4s while window is active (plus instant pull on window blur)
+                if self.isStreamWindowKey && tick % 3 == 0 {
+                    guard !Task.isCancelled, self.state == .streaming, self.clipboardAutoSync else { continue }
+                    await self.syncRemoteClipboardIfChanged(from: alias)
+                }
             }
         }
     }

@@ -155,6 +155,7 @@ final class NodeDeckAppDelegate: NSObject, NSApplicationDelegate {
     private var signalSources: [DispatchSourceSignal] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        raiseOpenFileDescriptorLimit()
         installSignalHandlers()
         statusBarController = StatusBarController(store: store)
         store.start()
@@ -185,6 +186,16 @@ final class NodeDeckAppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         WindowCoordinator.shared.prepareForTermination()
         store.stop()
+    }
+
+    private func raiseOpenFileDescriptorLimit() {
+        var lim = rlimit()
+        guard getrlimit(RLIMIT_NOFILE, &lim) == 0 else { return }
+        let desired: rlim_t = 4096
+        if lim.rlim_cur < desired {
+            lim.rlim_cur = min(desired, lim.rlim_max)
+            _ = setrlimit(RLIMIT_NOFILE, &lim)
+        }
     }
 
     private func installSignalHandlers() {

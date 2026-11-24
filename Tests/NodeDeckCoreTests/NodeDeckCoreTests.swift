@@ -210,6 +210,42 @@ final class NodeDeckCoreTests: XCTestCase {
         XCTAssertTrue(SunshineHostManager.bundledBinaryPath.hasSuffix("Contents/Helpers/NodeDeckHost.app/Contents/MacOS/nodedeck-host"))
     }
 
+    func testProcessRunnerNoFDLeakAndTimeoutReaping() {
+        // Run >260 invocations with stdin/stdout to verify zero FD leaks past macOS default 256 limit
+        for i in 0..<280 {
+            let res = ProcessRunner.run(
+                executable: "/bin/cat",
+                arguments: [],
+                input: "hello-\(i)",
+                timeout: 3
+            )
+            XCTAssertEqual(res.status, 0)
+            XCTAssertFalse(res.timedOut)
+            XCTAssertEqual(res.stdout, "hello-\(i)")
+        }
+
+        // Verify timeout kills & reaps cleanly
+        let slow = ProcessRunner.run(
+            executable: "/bin/sleep",
+            arguments: ["10"],
+            timeout: 0.25
+        )
+        XCTAssertTrue(slow.timedOut)
+
+        // Verify grandchild keeping stdout open (like ssh ControlPersist) does not block ProcessRunner
+        let t0 = Date()
+        let bg = ProcessRunner.run(
+            executable: "/bin/sh",
+            arguments: ["-c", "echo ready; (sleep 5) &"],
+            timeout: 4
+        )
+        let elapsed = Date().timeIntervalSince(t0)
+        XCTAssertEqual(bg.status, 0)
+        XCTAssertFalse(bg.timedOut)
+        XCTAssertTrue(bg.stdout.contains("ready"))
+        XCTAssertLessThan(elapsed, 1.0)
+    }
+
     func testLaunchAtLoginPlistLifecycle() throws {
         let tempURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("NodeDeckLaunchTest-\(UUID().uuidString).plist")
