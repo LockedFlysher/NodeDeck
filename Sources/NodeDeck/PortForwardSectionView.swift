@@ -266,6 +266,7 @@ private struct PortForwardStatePill: View {
 
 private struct PortForwardEditorSheet: View {
     @EnvironmentObject private var store: HostMonitor
+    @ObservedObject private var l10n = AppLocalization.shared
     @Environment(\.dismiss) private var dismiss
 
     let initialConfig: SSHPortForwardConfig
@@ -306,9 +307,9 @@ private struct PortForwardEditorSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(isEditingExisting ? "Edit SSH Port Forward" : "Add SSH Port Forward")
+                Text(isEditingExisting ? l10n.t("编辑 SSH 端口转发", "Edit SSH Port Forward") : l10n.t("添加 SSH 端口转发", "Add SSH Port Forward"))
                     .font(.headline)
-                Text("Host: \(initialConfig.hostAlias)")
+                Text(l10n.t("主机：\(initialConfig.hostAlias)", "Host: \(initialConfig.hostAlias)"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -334,15 +335,15 @@ private struct PortForwardEditorSheet: View {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 10) {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("Label")
+                        Text(l10n.t("名称", "Label"))
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
-                        TextField("e.g. JupyterLab", text: $label)
+                        TextField(l10n.t("例如 JupyterLab", "e.g. JupyterLab"), text: $label)
                             .textFieldStyle(.roundedBorder)
                     }
 
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("Direction")
+                        Text(l10n.t("方向", "Direction"))
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
                         Picker("Direction", selection: $direction) {
@@ -357,7 +358,7 @@ private struct PortForwardEditorSheet: View {
 
                 HStack(spacing: 10) {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("Local Bind Host")
+                        Text(l10n.t("本地监听地址", "Local Bind Host"))
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
                         TextField("127.0.0.1", text: $localHost)
@@ -366,7 +367,7 @@ private struct PortForwardEditorSheet: View {
                     }
 
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("Local Port")
+                        Text(l10n.t("本地端口", "Local Port"))
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
                         TextField("8888", text: $localPortText)
@@ -379,7 +380,7 @@ private struct PortForwardEditorSheet: View {
                 if direction != .dynamic {
                     HStack(spacing: 10) {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("Remote Host")
+                            Text(l10n.t("远端地址", "Remote Host"))
                                 .font(.caption.weight(.semibold))
                                 .foregroundStyle(.secondary)
                             TextField("127.0.0.1", text: $remoteHost)
@@ -388,7 +389,7 @@ private struct PortForwardEditorSheet: View {
                         }
 
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("Remote Port")
+                            Text(l10n.t("远端端口", "Remote Port"))
                                 .font(.caption.weight(.semibold))
                                 .foregroundStyle(.secondary)
                             TextField("8888", text: $remotePortText)
@@ -401,13 +402,13 @@ private struct PortForwardEditorSheet: View {
 
                 if direction == .local {
                     HStack(spacing: 10) {
-                        Text("Browser URL Scheme")
+                        Text(l10n.t("浏览器协议", "Browser URL Scheme"))
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
                         Picker("", selection: $urlScheme) {
                             Text("http://").tag("http")
                             Text("https://").tag("https")
-                            Text("None").tag("")
+                            Text(l10n.t("无", "None")).tag("")
                         }
                         .pickerStyle(.segmented)
                         .frame(width: 220)
@@ -415,9 +416,9 @@ private struct PortForwardEditorSheet: View {
                 }
 
                 HStack(spacing: 16) {
-                    Toggle("Auto-start when NodeDeck launches", isOn: $autoStart)
+                    Toggle(l10n.t("随 NodeDeck 自动启动", "Auto-start when NodeDeck launches"), isOn: $autoStart)
                         .font(.caption)
-                    Toggle("Start immediately", isOn: $startNow)
+                    Toggle(l10n.t("保存后立即启动", "Start immediately"), isOn: $startNow)
                         .font(.caption)
                 }
             }
@@ -432,9 +433,9 @@ private struct PortForwardEditorSheet: View {
 
             HStack {
                 Spacer()
-                Button("Cancel") { dismiss() }
+                Button(l10n.t("取消", "Cancel")) { dismiss() }
                     .keyboardShortcut(.cancelAction)
-                Button(isEditingExisting ? "Save" : "Add Forward") {
+                Button(isEditingExisting ? l10n.t("保存", "Save") : l10n.t("添加转发", "Add Forward")) {
                     save()
                 }
                 .buttonStyle(.borderedProminent)

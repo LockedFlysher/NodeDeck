@@ -789,15 +789,26 @@ class NodeDeckWindow(Gtk.Window):
         notebook.set_current_page(self.active_tab_index)
 
     def on_add_device(self, _btn):
-        dlg = Gtk.Dialog(title="Add SSH Device", transient_for=self, flags=0)
-        dlg.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL, Gtk.STOCK_OK, Gtk.ResponseType.OK)
+        dlg = Gtk.Dialog(title=self.t("添加 SSH 设备", "Add SSH Device"), transient_for=self, flags=0)
+        dlg.add_buttons(self.t("取消", "Cancel"), Gtk.ResponseType.CANCEL, self.t("添加", "Add"), Gtk.ResponseType.OK)
         box = dlg.get_content_area()
-        e_alias = Gtk.Entry(placeholder_text="Alias (e.g. gpu-node)")
-        e_host = Gtk.Entry(placeholder_text="HostName / IP (e.g. 192.168.1.10)")
+        e_alias = Gtk.Entry(placeholder_text=self.t("例如 gpu-node", "e.g. gpu-node"))
+        e_host = Gtk.Entry(placeholder_text=self.t("例如 192.168.1.10", "e.g. 192.168.1.10"))
         e_user = Gtk.Entry(text=os.getenv("USER", "ubuntu"))
         e_port = Gtk.Entry(text="22")
-        for w in [e_alias, e_host, e_user, e_port]:
-            box.pack_start(w, False, False, 4)
+        for lbl_txt, widget in [
+            (self.t("设备别名:", "Alias:"), e_alias),
+            (self.t("主机 / IP:", "HostName / IP:"), e_host),
+            (self.t("用户名:", "User:"), e_user),
+            (self.t("端口:", "Port:"), e_port),
+        ]:
+            row = Gtk.Box(spacing=6)
+            lbl = Gtk.Label(label=lbl_txt)
+            lbl.set_width_chars(14)
+            lbl.set_xalign(0)
+            row.pack_start(lbl, False, False, 0)
+            row.pack_start(widget, True, True, 0)
+            box.pack_start(row, False, False, 4)
         dlg.show_all()
         if dlg.run() == Gtk.ResponseType.OK:
             if e_alias.get_text().strip() and e_host.get_text().strip():
@@ -806,14 +817,19 @@ class NodeDeckWindow(Gtk.Window):
         dlg.destroy()
 
     def on_edit_device(self, host):
-        dlg = Gtk.Dialog(title=f'Edit SSH Device ({host["alias"]})', transient_for=self, flags=0)
-        dlg.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL, Gtk.STOCK_OK, Gtk.ResponseType.OK)
+        dlg = Gtk.Dialog(title=self.t(f'编辑 SSH 设备 ({host["alias"]})', f'Edit SSH Device ({host["alias"]})'), transient_for=self, flags=0)
+        dlg.add_buttons(self.t("取消", "Cancel"), Gtk.ResponseType.CANCEL, self.t("保存", "Save"), Gtk.ResponseType.OK)
         box = dlg.get_content_area()
         e_alias = Gtk.Entry(text=host["alias"])
         e_host = Gtk.Entry(text=host["hostname"])
         e_user = Gtk.Entry(text=host["user"])
         e_port = Gtk.Entry(text=host["port"])
-        for lbl_txt, widget in [("Alias:", e_alias), ("HostName / IP:", e_host), ("User:", e_user), ("Port:", e_port)]:
+        for lbl_txt, widget in [
+            (self.t("设备别名:", "Alias:"), e_alias),
+            (self.t("主机 / IP:", "HostName / IP:"), e_host),
+            (self.t("用户名:", "User:"), e_user),
+            (self.t("端口:", "Port:"), e_port),
+        ]:
             row = Gtk.Box(spacing=6)
             lbl = Gtk.Label(label=lbl_txt)
             lbl.set_width_chars(14)
@@ -847,13 +863,13 @@ class NodeDeckWindow(Gtk.Window):
             "cudaDeviceIndex": "0",
             "virtualAudioSink": False,
         })
-        dlg = Gtk.Dialog(title=f"Linux Multi-User Host Profile ({alias})", transient_for=self, flags=0)
-        dlg.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL, "Save & Sync Host", Gtk.ResponseType.OK)
+        dlg = Gtk.Dialog(title=self.t(f"主机多用户隔离配置 ({alias})", f"Linux Host Isolation Profile ({alias})"), transient_for=self, flags=0)
+        dlg.add_buttons(self.t("取消", "Cancel"), Gtk.ResponseType.CANCEL, self.t("保存并同步", "Save & Sync Host"), Gtk.ResponseType.OK)
         box = dlg.get_content_area()
 
         c_mode = Gtk.ComboBoxText()
-        c_mode.append("physicalDesktop", "Physical Desktop (KMS/X11)")
-        c_mode.append("isolatedVirtualDesktop", "Isolated Virtual Desktop (:99 Xorg)")
+        c_mode.append("physicalDesktop", self.t("物理桌面 (KMS/X11)", "Physical Desktop (KMS/X11)"))
+        c_mode.append("isolatedVirtualDesktop", self.t("多用户独立虚拟屏 (:99 Xorg)", "Isolated Virtual Desktop (:99 Xorg)"))
         c_mode.set_active_id(existing.get("mode", "physicalDesktop"))
 
         e_disp = Gtk.Entry(text=str(existing.get("display", ":99")))
@@ -863,15 +879,15 @@ class NodeDeckWindow(Gtk.Window):
             c_enc.append(enc, enc)
         c_enc.set_active_id(existing.get("encoder", "nvenc"))
         e_cuda = Gtk.Entry(text=str(existing.get("cudaDeviceIndex", "0")))
-        chk_audio = Gtk.CheckButton(label="Use Isolated Virtual Audio Sink (sunshine_virtual_sink)")
+        chk_audio = Gtk.CheckButton(label=self.t("启用独立虚拟静音音频汇 (sunshine_virtual_sink)", "Use Isolated Virtual Audio Sink (sunshine_virtual_sink)"))
         chk_audio.set_active(bool(existing.get("virtualAudioSink", False)))
 
         for lbl_txt, widget in [
-            ("Desktop Mode:", c_mode),
-            ("X11 Display:", e_disp),
-            ("Base HTTP Port:", e_port),
-            ("Video Encoder:", c_enc),
-            ("CUDA GPU Index:", e_cuda),
+            (self.t("桌面模式:", "Desktop Mode:"), c_mode),
+            (self.t("X11 显示号:", "X11 Display:"), e_disp),
+            (self.t("基准端口:", "Base HTTP Port:"), e_port),
+            (self.t("视频编码器:", "Video Encoder:"), c_enc),
+            (self.t("CUDA GPU 索引:", "CUDA GPU Index:"), e_cuda),
         ]:
             row = Gtk.Box(spacing=6)
             lbl = Gtk.Label(label=lbl_txt)
@@ -895,27 +911,37 @@ class NodeDeckWindow(Gtk.Window):
             }
             self.host_profiles[alias] = updated
             save_json(PROFILES_FILE, self.host_profiles)
-            self.status_label.set_text(f"Syncing host profile to {alias}...")
+            self.status_label.set_text(self.t(f"正在同步主机配置到 {alias}…", f"Syncing host profile to {alias}..."))
 
             def worker():
                 try:
                     out = reconcile_remote_host_profile(alias, updated)
-                    GLib.idle_add(self.status_label.set_text, f"Host profile synced to {alias} ({out})")
+                    GLib.idle_add(self.status_label.set_text, self.t(f"主机配置已同步到 {alias} ({out})", f"Host profile synced to {alias} ({out})"))
                 except Exception as exc:
-                    GLib.idle_add(self.status_label.set_text, f"Profile sync failed: {exc}")
+                    GLib.idle_add(self.status_label.set_text, self.t(f"同步失败: {exc}", f"Profile sync failed: {exc}"))
 
             threading.Thread(target=worker, daemon=True).start()
         dlg.destroy()
 
     def on_add_forward(self, host):
-        dlg = Gtk.Dialog(title=f'Add Port Forward ({host["alias"]})', transient_for=self, flags=0)
-        dlg.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL, Gtk.STOCK_OK, Gtk.ResponseType.OK)
+        dlg = Gtk.Dialog(title=self.t(f'添加端口转发 ({host["alias"]})', f'Add Port Forward ({host["alias"]})'), transient_for=self, flags=0)
+        dlg.add_buttons(self.t("取消", "Cancel"), Gtk.ResponseType.CANCEL, self.t("添加", "Add"), Gtk.ResponseType.OK)
         box = dlg.get_content_area()
         e_label = Gtk.Entry(text="Jupyter")
         e_flag = Gtk.Entry(text="-L")
         e_spec = Gtk.Entry(text="127.0.0.1:8888:127.0.0.1:8888")
-        for w in [e_label, e_flag, e_spec]:
-            box.pack_start(w, False, False, 4)
+        for lbl_txt, widget in [
+            (self.t("名称:", "Label:"), e_label),
+            (self.t("方向 (-L/-R/-D):", "Flag (-L/-R/-D):"), e_flag),
+            (self.t("转发规则:", "Spec:"), e_spec),
+        ]:
+            row = Gtk.Box(spacing=6)
+            lbl = Gtk.Label(label=lbl_txt)
+            lbl.set_width_chars(16)
+            lbl.set_xalign(0)
+            row.pack_start(lbl, False, False, 0)
+            row.pack_start(widget, True, True, 0)
+            box.pack_start(row, False, False, 4)
         dlg.show_all()
         if dlg.run() == Gtk.ResponseType.OK:
             self.forwards.append({
@@ -950,23 +976,34 @@ class NodeDeckWindow(Gtk.Window):
         self.render_detail()
 
     def on_pair_sunshine(self, host):
-        dlg = Gtk.Dialog(title=f'Pair NodeDeck Host ({host["alias"]})', transient_for=self, flags=0)
-        dlg.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL, Gtk.STOCK_OK, Gtk.ResponseType.OK)
+        dlg = Gtk.Dialog(title=self.t(f'免 PIN 配对 ({host["alias"]})', f'Zero-PIN Pair ({host["alias"]})'), transient_for=self, flags=0)
+        dlg.add_buttons(self.t("取消", "Cancel"), Gtk.ResponseType.CANCEL, self.t("开始配对", "Pair"), Gtk.ResponseType.OK)
         box = dlg.get_content_area()
         e_addr = Gtk.Entry(text=host["hostname"])
         e_port = Gtk.Entry(text="47989")
         e_user = Gtk.Entry(text=host["user"])
-        e_pass = Gtk.Entry(placeholder_text="Optional Sudo Password (blank for user-space)")
+        e_pass = Gtk.Entry(placeholder_text=self.t("可选 Sudo 密码（用户态留空）", "Optional Sudo Password (blank for user-space)"))
         e_pass.set_visibility(False)
-        for w in [e_addr, e_port, e_user, e_pass]:
-            box.pack_start(w, False, False, 4)
+        for lbl_txt, widget in [
+            (self.t("宿主机地址:", "Host Address:"), e_addr),
+            (self.t("HTTP 端口:", "HTTP Port:"), e_port),
+            (self.t("SSH 账号:", "SSH User:"), e_user),
+            (self.t("密码:", "Password:"), e_pass),
+        ]:
+            row = Gtk.Box(spacing=6)
+            lbl = Gtk.Label(label=lbl_txt)
+            lbl.set_width_chars(14)
+            lbl.set_xalign(0)
+            row.pack_start(lbl, False, False, 0)
+            row.pack_start(widget, True, True, 0)
+            box.pack_start(row, False, False, 4)
         dlg.show_all()
         if dlg.run() == Gtk.ResponseType.OK:
             addr = e_addr.get_text().strip()
             port = int(e_port.get_text().strip() or "47989")
             user = e_user.get_text().strip()
             pwd = e_pass.get_text()
-            self.status_label.set_text(f"Pairing with {addr}:{port}...")
+            self.status_label.set_text(self.t(f"正在配对 {addr}:{port}…", f"Pairing with {addr}:{port}..."))
             threading.Thread(target=self._pair_worker, args=(host["alias"], addr, port, user, pwd), daemon=True).start()
         dlg.destroy()
 

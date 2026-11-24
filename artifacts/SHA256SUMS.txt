@@ -1,2 +1,2 @@
-c1b0139798695e3d3d88506b5192b019137dd1c282a3bec01a7ae0f3d0a53caf  NodeDeck-macos-universal.zip
-460291605b946181dcf4ed99f27cebdc63f334aab945c67adcd1885715f8a1d2  nodedeck_2.0.0_amd64.deb
+dd04f00443f7ffb6f0407fa3633418c7c1c4f81c640ea3be4ff3d71067df7cec  NodeDeck-macos-universal.zip
+494c0b7dbc2cf371c7301c2079e01da99acf1431d6a3791e4cf79f48a8e6d11a  nodedeck_2.0.0_amd64.deb
