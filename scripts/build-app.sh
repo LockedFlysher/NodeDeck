@@ -3,25 +3,28 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CONFIG="${1:-release}"
-APP_NAME="SSH Deck.app"
+APP_NAME="NodeDeck.app"
 APP_PATH="$ROOT/dist/$APP_NAME"
 UNIVERSAL="${UNIVERSAL:-1}"
+INSTALL="${INSTALL:-0}"
 
 cd "$ROOT"
+mkdir -p "$ROOT/.build" "$ROOT/dist"
+touch "$ROOT/.build/.metadata_never_index" "$ROOT/dist/.metadata_never_index"
 
 if [[ "$UNIVERSAL" == "1" ]]; then
     ARM_TRIPLE="arm64-apple-macosx14.0"
     INTEL_TRIPLE="x86_64-apple-macosx14.0"
     swift build -c "$CONFIG" --triple "$ARM_TRIPLE"
-    ARM_BIN="$(swift build -c "$CONFIG" --triple "$ARM_TRIPLE" --show-bin-path)/SSHDeck"
-    ARM_COPY="$ROOT/.build/SSHDeck-arm64"
+    ARM_BIN="$(swift build -c "$CONFIG" --triple "$ARM_TRIPLE" --show-bin-path)/NodeDeck"
+    ARM_COPY="$ROOT/.build/NodeDeck-arm64"
     cp "$ARM_BIN" "$ARM_COPY"
     swift build -c "$CONFIG" --triple "$INTEL_TRIPLE"
-    INTEL_BIN="$(swift build -c "$CONFIG" --triple "$INTEL_TRIPLE" --show-bin-path)/SSHDeck"
+    INTEL_BIN="$(swift build -c "$CONFIG" --triple "$INTEL_TRIPLE" --show-bin-path)/NodeDeck"
     ARM_BIN="$ARM_COPY"
 else
     swift build -c "$CONFIG"
-    ARM_BIN="$(swift build -c "$CONFIG" --show-bin-path)/SSHDeck"
+    ARM_BIN="$(swift build -c "$CONFIG" --show-bin-path)/NodeDeck"
     INTEL_BIN=""
 fi
 
@@ -29,13 +32,13 @@ rm -rf "$APP_PATH"
 mkdir -p "$APP_PATH/Contents/MacOS" "$APP_PATH/Contents/Resources"
 
 if [[ -n "$INTEL_BIN" ]]; then
-    lipo -create "$ARM_BIN" "$INTEL_BIN" -output "$APP_PATH/Contents/MacOS/SSHDeck"
+    lipo -create "$ARM_BIN" "$INTEL_BIN" -output "$APP_PATH/Contents/MacOS/NodeDeck"
 else
-    cp "$ARM_BIN" "$APP_PATH/Contents/MacOS/SSHDeck"
+    cp "$ARM_BIN" "$APP_PATH/Contents/MacOS/NodeDeck"
 fi
 cp "$ROOT/Support/Info.plist" "$APP_PATH/Contents/Info.plist"
 
-ICON_WORK="$ROOT/.build/sshdeck-icon"
+ICON_WORK="$ROOT/.build/nodedeck-icon"
 ICONSET="$ICON_WORK/AppIcon.iconset"
 MASTER="$ICON_WORK/AppIcon-1024.png"
 rm -rf "$ICON_WORK"
@@ -70,10 +73,19 @@ iconutil -c icns "$ICONSET" -o "$APP_PATH/Contents/Resources/AppIcon.icns"
 codesign --force --deep --sign - "$APP_PATH"
 
 ARTIFACT_DIR="$ROOT/artifacts"
-ARTIFACT_PATH="$ARTIFACT_DIR/SSHDeck-macos-universal.zip"
+ARTIFACT_PATH="$ARTIFACT_DIR/NodeDeck-macos-universal.zip"
 mkdir -p "$ARTIFACT_DIR"
 rm -f "$ARTIFACT_PATH" "$ARTIFACT_DIR/SHA256SUMS.txt"
 ditto -c -k --norsrc --keepParent "$APP_PATH" "$ARTIFACT_PATH"
 (cd "$ARTIFACT_DIR" && shasum -a 256 "$(basename "$ARTIFACT_PATH")" > SHA256SUMS.txt)
 
-printf '%s\n' "$APP_PATH"
+if [[ "$INSTALL" == "1" ]]; then
+    LSREG="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+    "$LSREG" -u "$APP_PATH" 2>/dev/null || true
+    rm -rf "/Applications/$APP_NAME"
+    mv "$APP_PATH" "/Applications/$APP_NAME"
+    "$LSREG" -f "/Applications/$APP_NAME" 2>/dev/null || true
+    printf '/Applications/%s\n' "$APP_NAME"
+else
+    printf '%s\n' "$APP_PATH"
+fi
