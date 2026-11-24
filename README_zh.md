@@ -33,7 +33,7 @@
 - **全栈内置主控端 + 无头被控端（无需额外安装 Moonlight 或 Sunshine）**
   - **内置主控端（Client）**：内置开源 `moonlight-common-c` 协议栈（`RTSP + ENet + FEC`），macOS 调用原生 **VideoToolbox** 硬解 HEVC/H.264，Linux 自动探测 **FFmpeg VAAPI（Intel/AMD）→ CUDA/NVDEC（NVIDIA）** 硬件解码并直出 NV12 纹理。
   - **内置无头被控端（`nodedeck-host`）**：直接从开源 `third_party/sunshine` 源码以 `-DSUNSHINE_ENABLE_TRAY=OFF` 编译内置（**零 Qt6、零多余托盘/DMG 臃肿包**）。macOS（`NodeDeckHost.app`，`LSUIElement=true` 静默后台）与 Linux（`/opt/nodedeck/host` + `systemd --user`）均支持在应用内一键启停本机被控端。
-  - 原生低延迟键盘引擎（完整 Win32 VK + 扩展键 + 过滤重复按键 + 失焦全键抬起防卡键）、**相对鼠标锁定模式**（`⌃⌥⇧M` / `Ctrl+Alt+Shift+M`，适配 3D/CAD/游戏）、**SSH 双向剪贴板同步**（自动推送默认关闭）、**隐私屏**，以及实时 RTT / 码率 / 传输路径 HUD。
+  - 原生低延迟键盘引擎（完整 Win32 VK + 扩展键 + 过滤重复按键 + 失焦全键抬起防卡键）、**相对鼠标锁定模式**（`⌃⌥⇧M` / `Ctrl+Alt+Shift+M`，适配 3D/CAD/游戏）、**自动双向 SSH 剪贴板同步**（自动识别 X11 `:99`/`:0` 与 Wayland）、**隐私屏**，以及实时 RTT / 码率 / 传输路径 HUD。
 - **SSH 免 PIN 证书配对 & Linux 多用户隔离配置**
   - 在本机生成 RSA-2048 证书，通过你已认证的 SSH 通道直接注入远端 `host_state.json`，完全跳过浏览器输入 PIN 码。
   - 内置 Linux 多用户宿主机隔离配置管理（独立虚拟 Xorg `:99`、独立 `CUDA_VISIBLE_DEVICES`、静音虚拟音频汇 `sunshine_virtual_sink`、多用户错开端口池），启动时通过 SHA-256 自动检测差异并同步远端服务。
@@ -61,7 +61,7 @@
 
 - **零云端、无账号**：主机列表（`~/.ssh/config`）、客户端证书（macOS 位于 `~/Library/Application Support/NodeDeck`，Linux 位于 `~/.config/nodedeck`）与全部设置均严格保存在本机。
 - **绝不保存明文密码**：后台监控统一使用 `BatchMode=yes` 与你的 SSH 公钥认证；免 PIN 配对时输入的可选密码仅用于当次 SSH 校验，绝不落盘或外发。
-- **默认隐私保护**：剪贴板自动推送默认关闭；不包含任何统计埋点或远端上报逻辑。
+- **默认隐私保护**：不包含任何统计埋点、遥测或云端中转；双向剪贴板同步仅经由你本机的 SSH 通道传输，可在串流控制栏随时开关。
 
 ---
 

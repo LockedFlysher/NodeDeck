@@ -219,8 +219,8 @@ struct ArchitectureGuideSheet: View {
                     icon: "bolt.horizontal.circle",
                     title: l10n.t("SSH 复用与安全同步", "Multiplexed SSH & Clipboard"),
                     body: l10n.t(
-                        "性能指标与剪贴板同步复用隔离的 ControlMaster 通道（60 秒无操作自动退出），不改动你的 ~/.ssh/config 主连接，且剪贴板自动同步默认关闭。",
-                        "Metrics and clipboard sync share an isolated ControlMaster socket (auto-expires after 60s idle) without touching your main SSH setup. Auto-clipboard push is OFF by default."
+                        "性能指标与剪贴板双向同步复用隔离的 ControlMaster 通道（60 秒无操作自动退出），不改动你的 ~/.ssh/config 主连接，并可在串流工具栏随时启停剪贴板同步。",
+                        "Metrics and bidirectional clipboard sync share an isolated ControlMaster socket (auto-expires after 60s idle) without touching your main SSH setup; clipboard sync can be toggled anytime in the stream bar."
                     )
                 )
             }

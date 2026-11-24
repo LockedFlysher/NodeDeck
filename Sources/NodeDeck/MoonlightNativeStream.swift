@@ -558,8 +558,18 @@ final class MoonlightStreamSession: ObservableObject {
     @Published var showPerformanceHUD: Bool = false
     @Published var swapCmdToCtrl: Bool = false
     @Published var relativeMouseEnabled: Bool = false
-    @Published var clipboardAutoSync: Bool = false {
-        didSet { updateClipboardAutoSyncTask() }
+    private static let clipboardAutoSyncKey = "nodedeck.clipboardAutoSync"
+
+    @Published var clipboardAutoSync: Bool = {
+        if UserDefaults.standard.object(forKey: "nodedeck.clipboardAutoSync") == nil {
+            return true
+        }
+        return UserDefaults.standard.bool(forKey: "nodedeck.clipboardAutoSync")
+    }() {
+        didSet {
+            UserDefaults.standard.set(clipboardAutoSync, forKey: Self.clipboardAutoSyncKey)
+            updateClipboardAutoSyncTask()
+        }
     }
     @Published var clipboardStatusMessage: String?
 
@@ -574,6 +584,10 @@ final class MoonlightStreamSession: ObservableObject {
     private var isStopping = false
     private var clipboardPollTask: Task<Void, Never>?
     private var lastSyncedChangeCount: Int = NSPasteboard.general.changeCount
+    private var lastSyncedText: String?
+    private var lastRemoteText: String?
+    private var hasInitializedRemoteClipboardBaseline = false
+    private var isClipboardSyncInFlight = false
     var canSyncClipboard: Bool { !(sshHostAlias ?? "").isEmpty }
 
     init() {
@@ -646,6 +660,8 @@ final class MoonlightStreamSession: ObservableObject {
                     bitrateKbps: bitrateKbps
                 )
 
+                self.updateClipboardAutoSyncTask()
+
                 if enablePrivacyScreen {
                     await setPrivacyScreen(enabled: true)
                 }
@@ -712,18 +728,21 @@ final class MoonlightStreamSession: ObservableObject {
 
     func pushMacClipboardToRemote() {
         guard let alias = sshHostAlias, !alias.isEmpty else {
-            clipboardStatusMessage = "未绑定 SSH 别名"
+            clipboardStatusMessage = AppLocalization.shared.t("未绑定 SSH 别名", "No SSH alias bound")
             return
         }
         guard let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else {
-            clipboardStatusMessage = "本机剪贴板无文本"
+            clipboardStatusMessage = AppLocalization.shared.t("本机剪贴板无文本", "Mac clipboard has no text")
             return
         }
-        clipboardStatusMessage = "发送中…"
+        clipboardStatusMessage = AppLocalization.shared.t("发送中…", "Pushing…")
         Task {
             do {
                 try await ClipboardSyncManager.pushText(text, to: alias)
-                clipboardStatusMessage = "已发送到远端 (\(text.count) 字)"
+                lastSyncedText = text
+                lastRemoteText = text
+                lastSyncedChangeCount = NSPasteboard.general.changeCount
+                clipboardStatusMessage = AppLocalization.shared.t("已发送到远端 (\(text.count) 字)", "Pushed to host (\(text.count) chars)")
             } catch {
                 clipboardStatusMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             }
@@ -732,40 +751,116 @@ final class MoonlightStreamSession: ObservableObject {
 
     func pullRemoteClipboardToMac() {
         guard let alias = sshHostAlias, !alias.isEmpty else {
-            clipboardStatusMessage = "未绑定 SSH 别名"
+            clipboardStatusMessage = AppLocalization.shared.t("未绑定 SSH 别名", "No SSH alias bound")
             return
         }
-        clipboardStatusMessage = "拉取中…"
+        clipboardStatusMessage = AppLocalization.shared.t("拉取中…", "Pulling…")
         Task {
             do {
                 let text = try await ClipboardSyncManager.pullText(from: alias)
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(text, forType: .string)
                 lastSyncedChangeCount = NSPasteboard.general.changeCount
-                clipboardStatusMessage = "已拉取到 Mac (\(text.count) 字)"
+                lastSyncedText = text
+                lastRemoteText = text
+                hasInitializedRemoteClipboardBaseline = true
+                clipboardStatusMessage = AppLocalization.shared.t("已拉取到 Mac (\(text.count) 字)", "Pulled to Mac (\(text.count) chars)")
             } catch {
                 clipboardStatusMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             }
         }
     }
 
+    func handleWindowDidBecomeKey() {
+        guard clipboardAutoSync, state == .streaming, let alias = sshHostAlias, !alias.isEmpty else { return }
+        Task {
+            await syncMacClipboardIfChanged(to: alias, forceIfUnsynced: true)
+        }
+    }
+
+    func handleWindowDidResignKey() {
+        guard clipboardAutoSync, state == .streaming, let alias = sshHostAlias, !alias.isEmpty else { return }
+        Task {
+            await syncRemoteClipboardIfChanged(from: alias)
+        }
+    }
+
+    private func syncMacClipboardIfChanged(to alias: String, forceIfUnsynced: Bool = false) async {
+        guard !isClipboardSyncInFlight else { return }
+        let count = NSPasteboard.general.changeCount
+        guard forceIfUnsynced || count != lastSyncedChangeCount else { return }
+        lastSyncedChangeCount = count
+
+        guard let text = NSPasteboard.general.string(forType: .string),
+              !text.isEmpty,
+              text.utf8.count <= ClipboardSyncManager.maxBytes,
+              text != lastSyncedText
+        else {
+            return
+        }
+
+        isClipboardSyncInFlight = true
+        defer { isClipboardSyncInFlight = false }
+        do {
+            try await ClipboardSyncManager.pushText(text, to: alias)
+            lastSyncedText = text
+            lastRemoteText = text
+            clipboardStatusMessage = AppLocalization.shared.t("已自动同步到远端 (\(text.count) 字)", "Synced to host (\(text.count) chars)")
+        } catch {
+            clipboardStatusMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+
+    private func syncRemoteClipboardIfChanged(from alias: String) async {
+        guard !isClipboardSyncInFlight else { return }
+        isClipboardSyncInFlight = true
+        defer { isClipboardSyncInFlight = false }
+
+        do {
+            let remoteText = try await ClipboardSyncManager.pullText(from: alias)
+            if !hasInitializedRemoteClipboardBaseline {
+                hasInitializedRemoteClipboardBaseline = true
+                lastRemoteText = remoteText
+                return
+            }
+            guard remoteText != lastRemoteText, remoteText != lastSyncedText else {
+                return
+            }
+            guard remoteText.utf8.count <= ClipboardSyncManager.maxBytes else { return }
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(remoteText, forType: .string)
+            lastSyncedChangeCount = NSPasteboard.general.changeCount
+            lastSyncedText = remoteText
+            lastRemoteText = remoteText
+            clipboardStatusMessage = AppLocalization.shared.t("已自动同步到 Mac (\(remoteText.count) 字)", "Synced to Mac (\(remoteText.count) chars)")
+        } catch ClipboardSyncError.emptyClipboard {
+            hasInitializedRemoteClipboardBaseline = true
+        } catch {
+            // Keep transient network hiccups quiet unless user manually triggers
+        }
+    }
+
     private func updateClipboardAutoSyncTask() {
         clipboardPollTask?.cancel()
         clipboardPollTask = nil
+        hasInitializedRemoteClipboardBaseline = false
+        lastRemoteText = nil
+        lastSyncedText = nil
         guard clipboardAutoSync, let alias = sshHostAlias, !alias.isEmpty else { return }
         lastSyncedChangeCount = NSPasteboard.general.changeCount
+
         clipboardPollTask = Task { [weak self] in
+            // Initial push if user already had text on Mac clipboard when opening remote desktop
+            guard let self else { return }
+            if self.state == .streaming {
+                await self.syncMacClipboardIfChanged(to: alias, forceIfUnsynced: true)
+            }
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 1_200_000_000)
-                guard let self, !Task.isCancelled, self.state == .streaming, self.clipboardAutoSync else { continue }
-                let count = NSPasteboard.general.changeCount
-                if count != self.lastSyncedChangeCount {
-                    self.lastSyncedChangeCount = count
-                    if let text = NSPasteboard.general.string(forType: .string), !text.isEmpty, text.utf8.count <= ClipboardSyncManager.maxBytes {
-                        try? await ClipboardSyncManager.pushText(text, to: alias)
-                        self.clipboardStatusMessage = "已自动同步 (\(text.count) 字)"
-                    }
-                }
+                try? await Task.sleep(nanoseconds: 850_000_000)
+                guard !Task.isCancelled, self.state == .streaming, self.clipboardAutoSync else { continue }
+                await self.syncMacClipboardIfChanged(to: alias)
+                guard !Task.isCancelled, self.state == .streaming, self.clipboardAutoSync else { continue }
+                await self.syncRemoteClipboardIfChanged(from: alias)
             }
         }
     }
@@ -1727,7 +1822,7 @@ private struct MoonlightStreamContentView: View {
                             .font(.caption2.weight(.semibold))
                             .foregroundStyle(.white.opacity(0.8))
                         Spacer()
-                        Toggle(l10n.t("自动推送", "Auto Push"), isOn: $session.clipboardAutoSync)
+                        Toggle(l10n.t("自动双向同步", "Auto Sync"), isOn: $session.clipboardAutoSync)
                             .toggleStyle(.switch)
                             .controlSize(.mini)
                             .font(.caption2)
@@ -1936,6 +2031,14 @@ final class MoonlightStreamWindowController: NSObject, NSWindowDelegate {
         window?.delegate = nil
         window?.close()
         window = nil
+    }
+
+    func windowDidBecomeKey(_ notification: Notification) {
+        session?.handleWindowDidBecomeKey()
+    }
+
+    func windowDidResignKey(_ notification: Notification) {
+        session?.handleWindowDidResignKey()
     }
 
     func windowWillClose(_ notification: Notification) {

@@ -33,7 +33,7 @@ It unifies OpenSSH device management, live CPU/GPU/Slurm/process telemetry, buil
 - **All-in-One Built-in Remote Desktop Client & Headless Host (No External Moonlight or Sunshine Required)**
   - **Built-in Client**: Embeds `moonlight-common-c` (`RTSP + ENet + FEC`) with native **VideoToolbox** HEVC/H.264 decoding on macOS and automatic **FFmpeg VAAPI (Intel/AMD) → CUDA/NVDEC (NVIDIA)** hardware decoding on Linux.
   - **Built-in Headless Host (`nodedeck-host`)**: Compiled directly from open-source `third_party/sunshine` with `-DSUNSHINE_ENABLE_TRAY=OFF` (zero Qt6, zero external DMG/installer bloat). Start/stop the local host in one click on both macOS (`NodeDeckHost.app`, `LSUIElement=true`) and Linux (`/opt/nodedeck/host` + `systemd --user`).
-  - Native low-latency keyboard engine (full Win32 VK + extended-key + repeat filtering + focus-loss key release), **Relative Mouse Lock** (`⌃⌥⇧M` / `Ctrl+Alt+Shift+M`) for 3D/CAD/FPS, **Bidirectional SSH Clipboard Sync** (opt-in auto-push, off by default), **Privacy Screen**, and a real-time RTT / bitrate / transport-route telemetry HUD.
+  - Native low-latency keyboard engine (full Win32 VK + extended-key + repeat filtering + focus-loss key release), **Relative Mouse Lock** (`⌃⌥⇧M` / `Ctrl+Alt+Shift+M`) for 3D/CAD/FPS, **Automatic Bidirectional SSH Clipboard Sync** (auto-detects X11 `:99`/`:0` & Wayland), **Privacy Screen**, and a real-time RTT / bitrate / transport-route telemetry HUD.
 - **Zero-PIN SSH Certificate Pairing & Linux Multi-User Isolation**
   - Generates an RSA-2048 client certificate locally and injects it into your remote Sunshine / `nodedeck-host` over your authenticated SSH session — no manual browser PIN entry.
   - Manage per-user Linux host isolation profiles (isolated Xorg virtual display `:99`, dedicated `CUDA_VISIBLE_DEVICES`, silent virtual audio sink, disjoint port pool) with automatic SHA-256 config drift reconciliation.
@@ -61,7 +61,7 @@ NodeDeck includes an in-app **How It Works & Security Model** panel (`shield.che
 
 - **Zero Cloud & No Account**: All host lists (`~/.ssh/config`), client certificates (`~/Library/Application Support/NodeDeck` on macOS, `~/.config/nodedeck` on Linux), and runtime settings stay strictly on your local machine.
 - **No Plaintext Password Storage**: Background metric probes run with `BatchMode=yes` using your SSH keys; optional credentials entered during Zero-PIN pairing are used solely for that SSH verification step and are never written to disk.
-- **Privacy by Default**: Auto-clipboard push is disabled by default; telemetry and crash reporting do not exist.
+- **Privacy by Default**: Telemetry, crash reporting, and cloud relays do not exist; bidirectional clipboard sync runs strictly over your local SSH session and can be toggled anytime in the stream HUD.
 
 ---
 
