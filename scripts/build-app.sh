@@ -5,8 +5,10 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CONFIG="${1:-release}"
 APP_NAME="NodeDeck.app"
 APP_PATH="$ROOT/dist/$APP_NAME"
-UNIVERSAL="${UNIVERSAL:-1}"
+UNIVERSAL="${UNIVERSAL:-0}"
 INSTALL="${INSTALL:-0}"
+HOST_APP="${HOST_APP:-$ROOT/.build/host/NodeDeckHost.app}"
+HOST_BIN="${HOST_BIN:-$ROOT/.build/host/nodedeck-host}"
 
 cd "$ROOT"
 mkdir -p "$ROOT/.build" "$ROOT/dist"
@@ -70,14 +72,34 @@ done
 
 iconutil -c icns "$ICONSET" -o "$APP_PATH/Contents/Resources/AppIcon.icns"
 
+# Embed source-built headless NodeDeckHost.app (zero-Qt Sunshine host) if present
+if [[ -d "$HOST_APP" ]]; then
+    mkdir -p "$APP_PATH/Contents/Helpers"
+    rm -rf "$APP_PATH/Contents/Helpers/NodeDeckHost.app"
+    ditto "$HOST_APP" "$APP_PATH/Contents/Helpers/NodeDeckHost.app"
+elif [[ -x "$HOST_BIN" ]]; then
+    mkdir -p "$APP_PATH/Contents/Helpers"
+    cp "$HOST_BIN" "$APP_PATH/Contents/Helpers/nodedeck-host"
+    chmod 0755 "$APP_PATH/Contents/Helpers/nodedeck-host"
+    HOST_LIB_DIR="$(dirname "$HOST_BIN")/host-lib"
+    if [[ -d "$HOST_LIB_DIR" ]] && [[ -n "$(ls -A "$HOST_LIB_DIR" 2>/dev/null)" ]]; then
+        rm -rf "$APP_PATH/Contents/Helpers/host-lib"
+        ditto "$HOST_LIB_DIR" "$APP_PATH/Contents/Helpers/host-lib"
+    fi
+fi
+
 codesign --force --deep --sign - "$APP_PATH"
 
 ARTIFACT_DIR="$ROOT/artifacts"
-ARTIFACT_PATH="$ARTIFACT_DIR/NodeDeck-macos-universal.zip"
+if [[ "$UNIVERSAL" == "1" ]]; then
+    ARTIFACT_PATH="$ARTIFACT_DIR/NodeDeck-macos-universal.zip"
+else
+    ARTIFACT_PATH="$ARTIFACT_DIR/NodeDeck-macos-arm64.zip"
+fi
 mkdir -p "$ARTIFACT_DIR"
-rm -f "$ARTIFACT_PATH" "$ARTIFACT_DIR/SHA256SUMS.txt"
+rm -f "$ARTIFACT_PATH" "$ARTIFACT_DIR/NodeDeck-macos-universal.zip"
 ditto -c -k --norsrc --keepParent "$APP_PATH" "$ARTIFACT_PATH"
-(cd "$ARTIFACT_DIR" && shasum -a 256 "$(basename "$ARTIFACT_PATH")" > SHA256SUMS.txt)
+(cd "$ARTIFACT_DIR" && shasum -a 256 *.zip *.deb 2>/dev/null > SHA256SUMS.txt || shasum -a 256 "$(basename "$ARTIFACT_PATH")" > SHA256SUMS.txt)
 
 if [[ "$INSTALL" == "1" ]]; then
     LSREG="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"

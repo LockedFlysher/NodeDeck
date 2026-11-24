@@ -48,6 +48,84 @@ def resolve_stream_bin() -> str:
     return "/opt/nodedeck/nodedeck-stream"
 
 
+def resolve_host_bin() -> str:
+    candidates = [
+        Path.home() / ".local" / "share" / "nodedeck" / "host" / "bin" / "nodedeck-host",
+        Path("/opt/nodedeck/host/bin/nodedeck-host"),
+        Path("/usr/bin/sunshine"),
+        Path("/usr/local/bin/sunshine"),
+    ]
+    for path in candidates:
+        if path.exists() and os.access(path, os.X_OK):
+            return str(path)
+    return ""
+
+
+def is_local_host_running() -> bool:
+    try:
+        r = subprocess.run(
+            ["systemctl", "--user", "is-active", "--quiet", "nodedeck-host.service"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+        )
+        if r.returncode == 0:
+            return True
+    except Exception:
+        pass
+    try:
+        r = subprocess.run(
+            ["pgrep", "-f", r"(^|/)nodedeck-host($| )|(^|/)sunshine($| )"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def has_user_host_service() -> bool:
+    for p in (
+        Path.home() / ".config/systemd/user/nodedeck-host.service",
+        Path("/usr/lib/systemd/user/nodedeck-host.service"),
+        Path("/etc/systemd/user/nodedeck-host.service"),
+    ):
+        if p.exists():
+            return True
+    return False
+
+
+def ensure_local_host_config() -> Path:
+    host_dir = CONF_DIR / "host"
+    host_dir.mkdir(parents=True, exist_ok=True)
+    apps_file = host_dir / "apps.json"
+    if not apps_file.exists():
+        apps_file.write_text(
+            json.dumps({"env": {}, "apps": [{"name": "Desktop", "image-path": "desktop.png"}]}, indent=2),
+            encoding="utf-8",
+        )
+    conf_file = host_dir / "host.conf"
+    if not conf_file.exists():
+        conf_file.write_text(
+            "\n".join(
+                [
+                    "# Managed by NodeDeck Built-in Host",
+                    f"sunshine_name = {os.uname().nodename}",
+                    "port = 47989",
+                    f"file_apps = {apps_file}",
+                    f"file_state = {host_dir / 'host_state.json'}",
+                    f"credentials_file = {host_dir / 'credentials.json'}",
+                    f"pkey = {host_dir / 'host.key'}",
+                    f"cert = {host_dir / 'host.cert'}",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    return conf_file
+
+
 def resolve_icon_path() -> str:
     candidates = [
         Path.home() / ".local" / "share" / "nodedeck" / "nodedeck.png",
@@ -390,8 +468,12 @@ class NodeDeckWindow(Gtk.Window):
         self.btn_add.connect("clicked", self.on_add_device)
         self.hb.pack_start(self.btn_add)
 
+        self.btn_host = Gtk.Button()
+        self.btn_host.connect("clicked", self.on_toggle_local_host)
+        self.hb.pack_start(self.btn_host)
+
         self.btn_refresh = Gtk.Button()
-        self.btn_refresh.connect("clicked", lambda *_: self.reload_hosts())
+        self.btn_refresh.connect("clicked", lambda *_: (self._update_chrome_labels(), self.reload_hosts()))
         self.hb.pack_end(self.btn_refresh)
 
         self.btn_lang = Gtk.Button()
@@ -434,13 +516,55 @@ class NodeDeckWindow(Gtk.Window):
 
     def _update_chrome_labels(self):
         self.hb.props.subtitle = self.t(
-            "零云端 · SSH 管理 · 硬件串流 · 多用户隔离",
-            "Zero-Cloud · SSH · Hardware Moonlight · Multi-User Isolation",
+            "零云端 · SSH 管理 · 内置主/被控端 · 多用户隔离",
+            "Zero-Cloud · SSH · Built-in Client & Host · Multi-User Isolation",
         )
         self.btn_add.set_label(self.t("+ 添加设备", "+ Add Device"))
+        host_bin = resolve_host_bin()
+        if not host_bin:
+            self.btn_host.set_label(self.t("○ 本机被控端未就绪", "○ Host Missing"))
+            self.btn_host.set_sensitive(False)
+        elif is_local_host_running():
+            self.btn_host.set_label(self.t("● 本机被控端: 运行中", "● Local Host: On"))
+            self.btn_host.set_sensitive(True)
+        else:
+            self.btn_host.set_label(self.t("○ 启动本机被控端", "○ Start Local Host"))
+            self.btn_host.set_sensitive(True)
         self.btn_refresh.set_label(self.t("刷新", "Refresh"))
         self.btn_lang.set_label("EN" if self.lang == "zh" else "中文")
         self.btn_arch.set_label(self.t("技术原理与安全", "How It Works"))
+
+    def on_toggle_local_host(self, _btn):
+        host_bin = resolve_host_bin()
+        if not host_bin:
+            return
+        running = is_local_host_running()
+        try:
+            if running:
+                if has_user_host_service():
+                    subprocess.run(["systemctl", "--user", "stop", "nodedeck-host.service"], timeout=5)
+                subprocess.run(["pkill", "-x", "nodedeck-host"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
+                subprocess.run(["pkill", "-x", "sunshine"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
+                self.status_label.set_text(self.t("已停止本机被控端服务", "Stopped local host service"))
+            else:
+                if has_user_host_service():
+                    subprocess.run(["systemctl", "--user", "start", "nodedeck-host.service"], check=True, timeout=5)
+                else:
+                    conf_file = ensure_local_host_config()
+                    log_path = CONF_DIR / "host" / "nodedeck-host.log"
+                    with open(log_path, "ab") as logf:
+                        subprocess.Popen(
+                            [host_bin, str(conf_file)],
+                            cwd=str(conf_file.parent),
+                            stdout=logf,
+                            stderr=logf,
+                            stdin=subprocess.DEVNULL,
+                            start_new_session=True,
+                        )
+                self.status_label.set_text(self.t("本机被控端服务已启动（端口 47989）", "Local host service started (port 47989)"))
+        except Exception as exc:
+            self.status_label.set_text(self.t(f"本机被控端操作失败: {exc}", f"Local host error: {exc}"))
+        GLib.timeout_add(600, lambda: (self._update_chrome_labels(), False)[1])
 
     def on_toggle_lang(self, _btn):
         self.lang = "en" if self.lang == "zh" else "zh"
@@ -473,10 +597,10 @@ class NodeDeckWindow(Gtk.Window):
                 ),
             ),
             (
-                self.t("2. 原生硬件加速串流引擎", "2. Native Hardware-Accelerated Streaming"),
+                self.t("2. 内置主控端与无头被控端（All-in-One）", "2. Built-in Client & Headless Host (All-in-One)"),
                 self.t(
-                    "内置开源 moonlight-common-c 协议栈（RTSP + ENet + FEC），自动探测 FFmpeg VAAPI (Intel/AMD) 或 CUDA/NVDEC (NVIDIA) 硬件解码，直接上传 NV12 纹理，告别 CPU 软解高占用。",
-                    "Embeds open-source moonlight-common-c (RTSP + ENet + FEC) and auto-probes FFmpeg VAAPI (Intel/AMD) or CUDA/NVDEC (NVIDIA) hardware decoding with direct NV12 texture upload.",
+                    "主控端内置开源 moonlight-common-c（RTSP + ENet + FEC）并自动探测 FFmpeg VAAPI/CUDA 硬解；被控端基于开源 Sunshine 源码去除 Qt 编译内置为 nodedeck-host，无需额外安装 Moonlight 或 Sunshine。",
+                    "Built-in moonlight-common-c client with automatic FFmpeg VAAPI/CUDA hardware decode, paired with source-built headless zero-Qt Sunshine host (nodedeck-host). No separate Moonlight or Sunshine install required.",
                 ),
             ),
             (
@@ -489,8 +613,8 @@ class NodeDeckWindow(Gtk.Window):
             (
                 self.t("4. 开源合规说明", "4. Open-Source License Transparency"),
                 self.t(
-                    "NodeDeck 一方代码为 MIT 协议；内置串流协议 moonlight-common-c 及可选宿主机服务 Sunshine 采用 GPL-3.0 协议。",
-                    "First-party NodeDeck code is MIT-licensed; embedded moonlight-common-c and optional Sunshine host service are GPL-3.0.",
+                    "NodeDeck 一方代码为 MIT 协议；内置串流协议 moonlight-common-c 与源码编译内置的 Sunshine (nodedeck-host) 采用 GPL-3.0 协议。",
+                    "First-party NodeDeck code is MIT-licensed; embedded moonlight-common-c and source-built Sunshine (nodedeck-host) are GPL-3.0.",
                 ),
             ),
         ]

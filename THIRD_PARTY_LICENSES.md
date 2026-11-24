@@ -11,7 +11,7 @@ However, NodeDeck integrates and links against the following third-party open-so
 | **OpenSSL 3** | Linked statically / dynamically (`libcrypto`) | https://github.com/openssl/openssl | **Apache-2.0** | Compatible with GPL-3.0 and MIT. |
 | **Opus** | Linked statically / dynamically (`libopus`) | https://github.com/xiph/opus | **BSD-3-Clause** | Permissive; compatible with GPL-3.0 and MIT. |
 | **FFmpeg & SDL2** | Linked dynamically in Linux `nodedeck-stream` | https://ffmpeg.org / https://libsdl.org | **LGPL-2.1+ / zlib** | Dynamically linked system libraries on Linux. |
-| **Sunshine (`nodedeck-host`)** | Optional bundled Linux/macOS host service | https://github.com/SunshineStream/Sunshine | **GPL-3.0** | Runs as an independent out-of-process service (`nodedeck-host.service`). |
+| **Sunshine (`nodedeck-host`)** | `third_party/sunshine` (built headless without Qt into `NodeDeckHost.app` / `/opt/nodedeck/host`) | https://github.com/SunshineStream/Sunshine | **GPL-3.0** | Compiled from source with `-DSUNSHINE_ENABLE_TRAY=OFF` and executed out-of-process (`NodeDeckHost.app` on macOS, `nodedeck-host.service` on Linux). |
 
 ## Distribution Guidance
 - **Internal / personal use**: No extra redistribution steps required.

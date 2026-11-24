@@ -30,8 +30,9 @@ It unifies OpenSSH device management, live CPU/GPU/Slurm/process telemetry, buil
 - **Clean Tabbed Workspace & Instant Bilingual UI (`中文 / English`)**
   - Distraction-free detail view split into **Overview**, **Desktop & Network**, and **Workspace** tabs with live activity badges.
   - One-click runtime language switching (**System / 简体中文 / English**) on both macOS and Linux — no restart required.
-- **Built-in Hardware-Accelerated Remote Desktop (No External Moonlight App Required)**
-  - Embeds `moonlight-common-c` (`RTSP + ENet + FEC`) with native **VideoToolbox** HEVC/H.264 decoding on macOS and automatic **FFmpeg VAAPI (Intel/AMD) → CUDA/NVDEC (NVIDIA)** hardware decoding on Linux.
+- **All-in-One Built-in Remote Desktop Client & Headless Host (No External Moonlight or Sunshine Required)**
+  - **Built-in Client**: Embeds `moonlight-common-c` (`RTSP + ENet + FEC`) with native **VideoToolbox** HEVC/H.264 decoding on macOS and automatic **FFmpeg VAAPI (Intel/AMD) → CUDA/NVDEC (NVIDIA)** hardware decoding on Linux.
+  - **Built-in Headless Host (`nodedeck-host`)**: Compiled directly from open-source `third_party/sunshine` with `-DSUNSHINE_ENABLE_TRAY=OFF` (zero Qt6, zero external DMG/installer bloat). Start/stop the local host in one click on both macOS (`NodeDeckHost.app`, `LSUIElement=true`) and Linux (`/opt/nodedeck/host` + `systemd --user`).
   - Native low-latency keyboard engine (full Win32 VK + extended-key + repeat filtering + focus-loss key release), **Relative Mouse Lock** (`⌃⌥⇧M` / `Ctrl+Alt+Shift+M`) for 3D/CAD/FPS, **Bidirectional SSH Clipboard Sync** (opt-in auto-push, off by default), **Privacy Screen**, and a real-time RTT / bitrate / transport-route telemetry HUD.
 - **Zero-PIN SSH Certificate Pairing & Linux Multi-User Isolation**
   - Generates an RSA-2048 client certificate locally and injects it into your remote Sunshine / `nodedeck-host` over your authenticated SSH session — no manual browser PIN entry.
@@ -67,9 +68,11 @@ NodeDeck includes an in-app **How It Works & Security Model** panel (`shield.che
 
 ## Install
 
-### macOS (14.0+, Apple Silicon / Intel)
+Both release packages are **All-in-One** bundles containing **both** the built-in Moonlight client and the source-built headless Sunshine host (`nodedeck-host`) — no external Moonlight or Sunshine installation required.
 
-1. Download `NodeDeck-macos-universal.zip` from [GitHub Releases](../../releases/latest).
+### macOS (14.0+, Apple Silicon)
+
+1. Download `NodeDeck-macos-arm64.zip` from [GitHub Releases](../../releases/latest).
 2. Unzip and move `NodeDeck.app` to `/Applications`.
 3. Because release binaries are ad-hoc signed (not notarized), remove the quarantine attribute on first launch if macOS warns:
 
@@ -77,9 +80,11 @@ NodeDeck includes an in-app **How It Works & Security Model** panel (`shield.che
 xattr -dr com.apple.quarantine "/Applications/NodeDeck.app"
 ```
 
+> To allow other devices to connect to this Mac via the built-in host, grant **Screen & System Audio Recording** and **Accessibility** permissions when enabling **Local Host** in System Settings.
+
 ### Linux (Ubuntu 22.04 / 24.04 & Debian x86_64)
 
-Download `nodedeck_2.0.0_amd64.deb` from [GitHub Releases](../../releases/latest) and install with `apt` (automatically resolves GTK3, SDL2, FFmpeg, and Opus dependencies):
+Download `nodedeck_2.0.0_amd64.deb` from [GitHub Releases](../../releases/latest) and install with `apt` (automatically resolves GTK3, SDL2, FFmpeg, Opus, and `nodedeck-host` runtime libraries):
 
 ```bash
 sudo apt install ./nodedeck_2.0.0_amd64.deb
@@ -90,12 +95,22 @@ nodedeck
 
 ## Build from Source
 
-### macOS
-
-Requires Xcode / Swift 6 toolchain and Homebrew (`openssl@3`, `opus`):
+Clone with submodules so the open-source `third_party/sunshine` host code is included:
 
 ```bash
-brew install openssl@3 opus
+git clone --recursive https://github.com/LockedFlysher/NodeDeck.git
+cd NodeDeck
+```
+
+### macOS
+
+Requires Xcode / Swift 6 toolchain and Homebrew (`openssl@3`, `opus`, `cmake`, `ninja`, `pkgconf`, `boost`, `miniupnpc`):
+
+```bash
+brew install openssl@3 opus cmake ninja pkgconf boost miniupnpc
+# 1. Build headless zero-Qt Sunshine host from third_party/sunshine
+./scripts/build-host-macos.sh
+# 2. Run tests and package All-in-One NodeDeck.app (embeds NodeDeckHost.app)
 swift test
 UNIVERSAL=0 INSTALL=1 ./scripts/build-app.sh release
 open "/Applications/NodeDeck.app"
@@ -106,11 +121,11 @@ open "/Applications/NodeDeck.app"
 ### Linux
 
 ```bash
-# Direct install to /opt/nodedeck
-sudo ./linux/install-linux.sh
+# 1. Build headless zero-Qt Sunshine host from third_party/sunshine (into .build/host-linux)
+./linux/build-host-linux.sh
 
-# Or build a standalone .deb package into artifacts/
-./linux/build-deb.sh
+# 2. Build All-in-One .deb package (Client + Built-in nodedeck-host) into artifacts/
+BUNDLE_HOST=1 ./linux/build-deb.sh
 ```
 
 ---
@@ -132,4 +147,4 @@ Host gpu-workstation
 ## License & Third-Party Notices
 
 - NodeDeck's first-party Swift and Python source code is licensed under the **MIT License** ([LICENSE](LICENSE)).
-- NodeDeck embeds `moonlight-common-c` (**GPL-3.0**) and optionally orchestrates `Sunshine` (`nodedeck-host`, **GPL-3.0**). See [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) for the complete component & distribution compliance table.
+- NodeDeck embeds `moonlight-common-c` (**GPL-3.0**) and compiles `Sunshine` (`third_party/sunshine` → headless `nodedeck-host`, **GPL-3.0**) directly from source. See [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) for the complete component & distribution compliance table.

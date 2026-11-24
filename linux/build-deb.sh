@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
-# Build a self-contained Debian/Ubuntu .deb package for NodeDeck Linux.
+# Build an All-in-One Debian/Ubuntu .deb package for NodeDeck Linux (Client + Built-in nodedeck-host).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VERSION="${VERSION:-2.0.0}"
+BUNDLE_HOST="${BUNDLE_HOST:-1}"
+if [[ -z "${HOST_SRC_DIR:-}" ]]; then
+  if [[ -x "$ROOT/.build/host-linux/bin/nodedeck-host" ]]; then
+    HOST_SRC_DIR="$ROOT/.build/host-linux"
+  else
+    HOST_SRC_DIR="/opt/nodedeck/host"
+  fi
+fi
 ARCH="$(dpkg --print-architecture 2>/dev/null || echo amd64)"
 STAGE="$ROOT/.build/deb-stage"
 OUT_DIR="$ROOT/artifacts"
@@ -14,6 +22,7 @@ mkdir -p \
   "$STAGE/DEBIAN" \
   "$STAGE/opt/nodedeck" \
   "$STAGE/usr/local/bin" \
+  "$STAGE/usr/lib/systemd/user" \
   "$STAGE/usr/share/applications" \
   "$STAGE/usr/share/icons/hicolor/256x256/apps" \
   "$STAGE/usr/share/pixmaps" \
@@ -52,6 +61,35 @@ if [[ -f "$ROOT/linux/nodedeck.png" ]]; then
   install -m 0644 "$ROOT/linux/nodedeck.png" "$STAGE/usr/share/pixmaps/nodedeck.png"
 fi
 
+HOST_DEPENDS=""
+if [[ "$BUNDLE_HOST" == "1" ]]; then
+  if [[ -x "$HOST_SRC_DIR/bin/nodedeck-host" ]]; then
+    echo "=== Bundling built-in nodedeck-host from $HOST_SRC_DIR ==="
+    mkdir -p "$STAGE/opt/nodedeck/host"
+    cp -a "$HOST_SRC_DIR/." "$STAGE/opt/nodedeck/host/"
+    chmod 0755 "$STAGE/opt/nodedeck/host/bin/nodedeck-host"
+    HOST_DEPENDS=", libminiupnpc17 | libminiupnpc18, libnuma1, libva2, libva-drm2, libdrm2, libevdev2, libpulse0, libcurl4t64 | libcurl4, libcap2, libwayland-client0"
+
+    cat > "$STAGE/usr/lib/systemd/user/nodedeck-host.service" <<'EOF'
+[Unit]
+Description=NodeDeck Built-in Remote Desktop Host (Sunshine)
+After=graphical-session.target pipewire-pulse.service
+
+[Service]
+Type=simple
+ExecStartPre=/bin/sh -c 'mkdir -p "$HOME/.config/nodedeck"; if [ ! -f "$HOME/.config/nodedeck/apps.json" ]; then printf "{\n  \"env\": {},\n  \"apps\": [{ \"name\": \"Desktop\", \"image-path\": \"desktop.png\" }]\n}\n" > "$HOME/.config/nodedeck/apps.json"; fi; if [ ! -f "$HOME/.config/nodedeck/host.conf" ]; then printf "port = 47989\nfile_apps = %s/.config/nodedeck/apps.json\nfile_state = %s/.config/nodedeck/host_state.json\ncredentials_file = %s/.config/nodedeck/credentials.json\npkey = %s/.config/nodedeck/host.key\ncert = %s/.config/nodedeck/host.cert\n" "$HOME" "$HOME" "$HOME" "$HOME" "$HOME" > "$HOME/.config/nodedeck/host.conf"; fi'
+ExecStart=/opt/nodedeck/host/bin/nodedeck-host %h/.config/nodedeck/host.conf
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+EOF
+  else
+    echo "WARNING: BUNDLE_HOST=1 set, but $HOST_SRC_DIR/bin/nodedeck-host not found; building client-only .deb."
+  fi
+fi
+
 cat > "$STAGE/usr/local/bin/nodedeck" <<'EOF'
 #!/usr/bin/env bash
 exec python3 /opt/nodedeck/nodedeck_linux.py "$@"
@@ -61,7 +99,7 @@ chmod 0755 "$STAGE/usr/local/bin/nodedeck"
 cat > "$STAGE/usr/share/applications/nodedeck.desktop" <<'EOF'
 [Desktop Entry]
 Name=NodeDeck
-Comment=SSH Device Manager, Live GPU Metrics, Port Forwarding & Hardware Moonlight Client
+Comment=All-in-One SSH Workstation Manager, Built-in Remote Desktop Client & Host
 Exec=/usr/local/bin/nodedeck
 Icon=nodedeck
 Terminal=false
@@ -77,20 +115,23 @@ Section: net
 Priority: optional
 Architecture: ${ARCH}
 Maintainer: NodeDeck Contributors
-Depends: python3, python3-gi, gir1.2-gtk-3.0, libsdl2-2.0-0, libopus0, libssl3t64 | libssl3, libavcodec60 | libavcodec-extra60 | libavcodec59, libavutil58 | libavutil57, libswscale7 | libswscale6, openssh-client, openssl
-Description: NodeDeck SSH Workstation Manager & Native Moonlight Client
- Manage SSH devices, live CPU/GPU metrics, port forwarding, multi-user
- Linux Sunshine host isolation profiles, and hardware-accelerated desktop streaming.
+Depends: python3, python3-gi, gir1.2-gtk-3.0, libsdl2-2.0-0, libopus0, libssl3t64 | libssl3, libavcodec60 | libavcodec-extra60 | libavcodec59, libavutil58 | libavutil57, libswscale7 | libswscale6, openssh-client, openssl${HOST_DEPENDS}
+Description: NodeDeck All-in-One SSH Manager, Remote Desktop Client & Built-in Host
+ Zero-cloud SSH workstation manager with live CPU/GPU telemetry, port forwarding,
+ hardware-accelerated Moonlight streaming client, and built-in Sunshine host (nodedeck-host).
 EOF
 
 cat > "$STAGE/DEBIAN/postinst" <<'EOF'
 #!/usr/bin/env bash
 set -e
+if [ -x /opt/nodedeck/host/bin/nodedeck-host ] && command -v setcap >/dev/null 2>&1; then
+  setcap cap_sys_admin+p /opt/nodedeck/host/bin/nodedeck-host 2>/dev/null || true
+fi
 gtk-update-icon-cache -f /usr/share/icons/hicolor 2>/dev/null || true
 update-desktop-database /usr/share/applications 2>/dev/null || true
 EOF
 chmod 0755 "$STAGE/DEBIAN/postinst"
 
-dpkg-deb --build "$STAGE" "$DEB_PATH"
-echo "Built package: $DEB_PATH"
+dpkg-deb -Zxz --build "$STAGE" "$DEB_PATH"
+echo "Built All-in-One package: $DEB_PATH"
 ls -lh "$DEB_PATH"

@@ -190,10 +190,10 @@ struct ArchitectureGuideSheet: View {
             LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
                 techCard(
                     icon: "play.display",
-                    title: l10n.t("原生硬件串流引擎", "Native Hardware Streaming"),
+                    title: l10n.t("内置主控端与无头被控端", "Built-in Client & Headless Host"),
                     body: l10n.t(
-                        "内置开源 moonlight-common-c 协议栈（RTSP + ENet + FEC），macOS 调用 VideoToolbox，Linux 自动探测 VAAPI/NVDEC，无外部 Moonlight 依赖。",
-                        "Embeds open-source moonlight-common-c (RTSP + ENet + FEC). Uses VideoToolbox on macOS and auto-probes VAAPI/NVDEC on Linux with no external client required."
+                        "主控端内置开源 moonlight-common-c（VideoToolbox / VAAPI+NVDEC 硬解）；被控端由开源 Sunshine 源码去除 Qt 编译内置为 nodedeck-host，无需额外安装 Moonlight 或 Sunshine。",
+                        "Embeds moonlight-common-c client (VideoToolbox / VAAPI+NVDEC) and source-built headless zero-Qt Sunshine host (nodedeck-host). No separate Moonlight or Sunshine install required."
                     )
                 )
 
@@ -292,8 +292,8 @@ struct ArchitectureGuideSheet: View {
             Image(systemName: "doc.text.magnifyingglass")
                 .foregroundStyle(.secondary)
             Text(l10n.t(
-                "开源构成：NodeDeck 一方代码采用 MIT 协议；内置串流协议层 moonlight-common-c 与可选宿主机服务 Sunshine 采用 GPL-3.0 协议，详见仓库 THIRD_PARTY_LICENSES.md。",
-                "Open-Source Stack: First-party NodeDeck code is MIT-licensed; embedded moonlight-common-c and optional Sunshine host service are GPL-3.0 (see THIRD_PARTY_LICENSES.md)."
+                "开源构成：NodeDeck 一方代码采用 MIT 协议；内置串流协议层 moonlight-common-c 与源码编译内置的无头宿主机服务 Sunshine (nodedeck-host) 采用 GPL-3.0 协议，详见仓库 THIRD_PARTY_LICENSES.md。",
+                "Open-Source Stack: First-party NodeDeck code is MIT-licensed; embedded moonlight-common-c and source-built headless Sunshine host (nodedeck-host) are GPL-3.0 (see THIRD_PARTY_LICENSES.md)."
             ))
             .font(.system(size: 11))
             .foregroundStyle(.secondary)

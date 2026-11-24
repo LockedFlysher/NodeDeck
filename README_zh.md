@@ -30,8 +30,9 @@
 - **极简标签页布局 + 免重启中英文切换（`简体中文 / English`）**
   - 详情页清晰拆分为 **概览**、**远程与网络**、**工作区** 三个标签页并带实时计数徽章，首屏直达核心监控，告别重复按钮与冗余堆砌。
   - macOS 与 Linux 双端均支持一键实时切换 **跟随系统 / 简体中文 / English**，无需重启应用。
-- **内置硬件加速远程桌面（无需额外安装 Moonlight）**
-  - 内置开源 `moonlight-common-c` 协议栈（`RTSP + ENet + FEC`），macOS 调用原生 **VideoToolbox** 硬解 HEVC/H.264，Linux 自动探测 **FFmpeg VAAPI（Intel/AMD）→ CUDA/NVDEC（NVIDIA）** 硬件解码并直出 NV12 纹理。
+- **全栈内置主控端 + 无头被控端（无需额外安装 Moonlight 或 Sunshine）**
+  - **内置主控端（Client）**：内置开源 `moonlight-common-c` 协议栈（`RTSP + ENet + FEC`），macOS 调用原生 **VideoToolbox** 硬解 HEVC/H.264，Linux 自动探测 **FFmpeg VAAPI（Intel/AMD）→ CUDA/NVDEC（NVIDIA）** 硬件解码并直出 NV12 纹理。
+  - **内置无头被控端（`nodedeck-host`）**：直接从开源 `third_party/sunshine` 源码以 `-DSUNSHINE_ENABLE_TRAY=OFF` 编译内置（**零 Qt6、零多余托盘/DMG 臃肿包**）。macOS（`NodeDeckHost.app`，`LSUIElement=true` 静默后台）与 Linux（`/opt/nodedeck/host` + `systemd --user`）均支持在应用内一键启停本机被控端。
   - 原生低延迟键盘引擎（完整 Win32 VK + 扩展键 + 过滤重复按键 + 失焦全键抬起防卡键）、**相对鼠标锁定模式**（`⌃⌥⇧M` / `Ctrl+Alt+Shift+M`，适配 3D/CAD/游戏）、**SSH 双向剪贴板同步**（自动推送默认关闭）、**隐私屏**，以及实时 RTT / 码率 / 传输路径 HUD。
 - **SSH 免 PIN 证书配对 & Linux 多用户隔离配置**
   - 在本机生成 RSA-2048 证书，通过你已认证的 SSH 通道直接注入远端 `host_state.json`，完全跳过浏览器输入 PIN 码。
@@ -67,9 +68,11 @@
 
 ## 安装方式
 
-### macOS（14.0+，Apple Silicon / Intel）
+两个平台的发布包均为 **All-in-One 一体包**，同时内置 Moonlight 主控端与源码编译的无头 Sunshine 被控端（`nodedeck-host`）——无需单独安装 Moonlight 或 Sunshine。
 
-1. 前往 [GitHub Releases](../../releases/latest) 下载 `NodeDeck-macos-universal.zip`。
+### macOS（14.0+，Apple Silicon）
+
+1. 前往 [GitHub Releases](../../releases/latest) 下载 `NodeDeck-macos-arm64.zip`。
 2. 解压后将 `NodeDeck.app` 拖入 `/Applications`。
 3. 发布包采用本地自签名（未经 Apple 公证），首次打开若提示拦截，可右键点击 **打开** 或执行：
 
@@ -77,9 +80,11 @@
 xattr -dr com.apple.quarantine "/Applications/NodeDeck.app"
 ```
 
+> 如需让其他设备远程连接本台 Mac，在 NodeDeck 中首次开启 **本机被控端** 时，请在系统设置 -> 隐私与安全性中为 **NodeDeck Host** 授予 **录屏与系统录音** 与 **辅助功能** 权限。
+
 ### Linux（Ubuntu 22.04 / 24.04 & Debian x86_64）
 
-前往 [GitHub Releases](../../releases/latest) 下载 `nodedeck_2.0.0_amd64.deb`，使用 `apt` 安装（自动补齐 GTK3、SDL2、FFmpeg 与 Opus 依赖）：
+前往 [GitHub Releases](../../releases/latest) 下载 `nodedeck_2.0.0_amd64.deb`，使用 `apt` 安装（自动补齐 GTK3、SDL2、FFmpeg、Opus 及 `nodedeck-host` 运行依赖）：
 
 ```bash
 sudo apt install ./nodedeck_2.0.0_amd64.deb
@@ -90,12 +95,22 @@ nodedeck
 
 ## 从源码构建
 
-### macOS
-
-需安装 Xcode / Swift 6 工具链与 Homebrew 依赖（`openssl@3`、`opus`）：
+请携带子模块拉取仓库，以包含开源 `third_party/sunshine` 被控端源码：
 
 ```bash
-brew install openssl@3 opus
+git clone --recursive https://github.com/LockedFlysher/NodeDeck.git
+cd NodeDeck
+```
+
+### macOS
+
+需安装 Xcode / Swift 6 工具链与 Homebrew 依赖（`openssl@3`、`opus`、`cmake`、`ninja`、`pkgconf`、`boost`、`miniupnpc`）：
+
+```bash
+brew install openssl@3 opus cmake ninja pkgconf boost miniupnpc
+# 1. 从 third_party/sunshine 源码编译零 Qt 无头被控端
+./scripts/build-host-macos.sh
+# 2. 运行单测并打包 All-in-One NodeDeck.app（自动内置 NodeDeckHost.app）
 swift test
 UNIVERSAL=0 INSTALL=1 ./scripts/build-app.sh release
 open "/Applications/NodeDeck.app"
@@ -106,11 +121,11 @@ open "/Applications/NodeDeck.app"
 ### Linux
 
 ```bash
-# 直接编译安装到 /opt/nodedeck
-sudo ./linux/install-linux.sh
+# 1. 从 third_party/sunshine 源码编译零 Qt 无头被控端（输出至 .build/host-linux）
+./linux/build-host-linux.sh
 
-# 或打包生成标准 .deb 安装包至 artifacts/
-./linux/build-deb.sh
+# 2. 打包生成 All-in-One 标准 .deb 安装包（主控端 + 内置 nodedeck-host）至 artifacts/
+BUNDLE_HOST=1 ./linux/build-deb.sh
 ```
 
 ---
@@ -132,4 +147,4 @@ Host gpu-workstation
 ## 开源协议与第三方声明
 
 - NodeDeck 一方 Swift / Python 代码采用 **MIT 协议**（详见 [LICENSE](LICENSE)）。
-- 内置串流协议层 `moonlight-common-c`（**GPL-3.0**）及可选宿主机服务 `Sunshine` / `nodedeck-host`（**GPL-3.0**）的完整组件清单与分发说明详见 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)。
+- 内置串流协议层 `moonlight-common-c`（**GPL-3.0**）与源码编译内置的无头宿主机服务 `Sunshine`（`third_party/sunshine` → `nodedeck-host`，**GPL-3.0**）的完整组件清单与分发说明详见 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)。
