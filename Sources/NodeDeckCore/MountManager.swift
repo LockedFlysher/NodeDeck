@@ -488,7 +488,7 @@ public enum MountManager {
                 }
                 return ""
             }()
-            let sshCommand = "/usr/bin/ssh \(dedicatedSFTPPort)-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ControlMaster=no -o IPQoS=none -o ServerAliveInterval=10 -o ServerAliveCountMax=3 -o ClearAllForwardings=yes \(Shell.quote(selectedAlias))"
+            let sshCommand = "/usr/bin/ssh \(dedicatedSFTPPort)-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ControlMaster=no -o IPQoS=none -o ConnectTimeout=8 -o ServerAliveInterval=15 -o ServerAliveCountMax=6 -o ClearAllForwardings=yes \(Shell.quote(selectedAlias))"
 
             let result = ProcessRunner.run(
                 executable: rclone,
@@ -734,8 +734,16 @@ public enum MountManager {
             "--sftp-ssh", sshCommand,
             "--sftp-known-hosts-file", "none",
             "--sftp-idle-timeout", "0",
-            "--vfs-cache-mode", "writes",
-            "--dir-cache-time", "30s",
+            "--vfs-cache-mode", "full",
+            "--vfs-cache-max-age", "1h",
+            "--vfs-cache-max-size", "2G",
+            "--vfs-read-ahead", "16M",
+            "--vfs-fast-fingerprint",
+            "--dir-cache-time", "5m",
+            "--attr-timeout", "1m",
+            "--contimeout", "8s",
+            "--timeout", "15s",
+            "--low-level-retries", "5",
             "--transfers", "2",
             "--checkers", "2",
             "--volname", volName,

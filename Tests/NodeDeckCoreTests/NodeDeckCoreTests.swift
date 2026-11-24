@@ -498,6 +498,17 @@ final class NodeDeckCoreTests: XCTestCase {
         } else {
             XCTFail("Expected --sftp-idle-timeout 0 in rclone nfsmount arguments")
         }
+        if let vfsIdx = args.firstIndex(of: "--vfs-cache-mode") {
+            XCTAssertEqual(args[vfsIdx + 1], "full")
+        } else {
+            XCTFail("Expected --vfs-cache-mode full")
+        }
+        if let dirIdx = args.firstIndex(of: "--dir-cache-time") {
+            XCTAssertEqual(args[dirIdx + 1], "5m")
+        } else {
+            XCTFail("Expected --dir-cache-time 5m")
+        }
+        XCTAssertTrue(args.contains("--vfs-fast-fingerprint"))
     }
 
     func testSMBFirstMountConfigResolutionAndFallbackBadges() throws {
