@@ -21,7 +21,7 @@
 
 **NodeDeck** 是一款面向 GPU 工作站、实验室服务器、组网节点与 HPC 集群的**零云端、纯本地**跨平台运维与远程桌面工作台，原生支持 **macOS（SwiftUI + VideoToolbox）** 与 **Linux（GTK3 + FFmpeg VAAPI/CUDA + SDL2）**。
 
-它将 OpenSSH 设备管理、实时 CPU/GPU/Slurm/进程监控、内置硬件加速远程桌面（Moonlight/Sunshine 协议）、SSH 端口转发、GOST 隧道、VS Code Remote-SSH 工作区与访达目录挂载整合在同一轻量桌面端中——**无云端中转、免账号登录、零遥测上报**。
+它将 OpenSSH 设备管理、实时 CPU/GPU/Slurm/进程监控、内置硬件加速远程桌面（Moonlight/Sunshine 协议）、SSH 端口转发、VS Code Remote-SSH 工作区与访达目录挂载整合在同一轻量桌面端中——**无云端中转、免账号登录、零遥测上报**。
 
 ---
 
@@ -40,9 +40,8 @@
 - **完整 SSH 设备管理 & ControlMaster 高速实时监控**
   - 支持图形化新增、编辑、置顶、筛选与删除 `~/.ssh/config` 主机配置（完整保留注释、`Include` 文件与自定义字段）。
   - 采用隔离的 SSH `ControlMaster` 短连接复用（`/tmp/ndmux-<uid>/%C`，60 秒空闲自动退出），高速采集 CPU、内存、磁盘、NVIDIA/AMD 显卡、Slurm（`sinfo`）集群状态及**带完整启动参数的高负载进程列表**。
-- **SSH 端口转发（`-L` / `-R` / `-D`）、GOST 隧道、VS Code 与目录挂载**
+- **SSH 端口转发（`-L` / `-R` / `-D`）、VS Code 与目录挂载**
   - 一键管理本地/远程/SOCKS5 端口转发（Jupyter、TensorBoard、WebUI、API），支持自启与浏览器直达。
-  - 内置 GOST QUIC + 原生 POSIX UDP 隧道管理器。
   - 自动发现 VS Code Remote-SSH 工作区，并支持 macOS 原生 **SMB3 + `rclone nfsmount`** 挂载远端目录到访达。
 
 ---

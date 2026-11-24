@@ -7,14 +7,6 @@ struct MenuBarPopoverView: View {
     @ObservedObject private var l10n = AppLocalization.shared
     var onClosePopover: (() -> Void)? = nil
 
-    private var tunnels: [TunnelRuntimeItem] {
-        store.allTunnelItems
-    }
-
-    private var runningTunnelCount: Int {
-        tunnels.filter(\.isRunning).count
-    }
-
     private var moonlightTargets: [MoonlightTarget] {
         store.allMoonlightTargets
     }
@@ -35,14 +27,6 @@ struct MenuBarPopoverView: View {
                     .padding(.bottom, 6)
             }
 
-            if !tunnels.isEmpty {
-                tunnelsSection
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-
-                Divider()
-            }
-
             hostsSection
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
@@ -54,7 +38,6 @@ struct MenuBarPopoverView: View {
         .background(Color(nsColor: .windowBackgroundColor))
         .onAppear {
             store.start()
-            store.syncTunnelSnapshots()
         }
     }
 
@@ -72,14 +55,10 @@ struct MenuBarPopoverView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("NodeDeck")
                     .font(.system(size: 13.5, weight: .semibold))
-                Text(
-                    tunnels.isEmpty
-                        ? "\(store.onlineCount)/\(store.hosts.count) nodes · \(store.mountedHostCount) mounts"
-                        : "\(store.onlineCount)/\(store.hosts.count) nodes · \(runningTunnelCount)/\(tunnels.count) tunnels · \(store.mountedHostCount) mounts"
-                )
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+                Text("\(store.onlineCount)/\(store.hosts.count) nodes · \(store.mountedHostCount) mounts")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
 
             Spacer()
@@ -98,7 +77,7 @@ struct MenuBarPopoverView: View {
                 }
             }
             .buttonStyle(.borderless)
-            .help("Refresh hosts, tunnels, and mounts")
+            .help(l10n.t("刷新主机与挂载", "Refresh hosts and mounts"))
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 11)
@@ -111,7 +90,6 @@ struct MenuBarPopoverView: View {
                 .foregroundStyle(.secondary)
 
             ForEach(moonlightTargets) { target in
-                let runtime = target.tunnelConfig.flatMap { cfg in tunnels.first { $0.id == cfg.id } }
                 HStack(spacing: 9) {
                     ZStack {
                         RoundedRectangle(cornerRadius: 7, style: .continuous)
@@ -123,14 +101,9 @@ struct MenuBarPopoverView: View {
                     .frame(width: 28, height: 28)
 
                     VStack(alignment: .leading, spacing: 1.5) {
-                        HStack(spacing: 5) {
-                            Text(target.title)
-                                .font(.system(size: 11.5, weight: .semibold))
-                                .lineLimit(1)
-                            if let runtime {
-                                TunnelStatePill(state: runtime.state)
-                            }
-                        }
+                        Text(target.title)
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .lineLimit(1)
                         Text(target.subtitle)
                             .font(.system(size: 10))
                             .foregroundStyle(.secondary)
@@ -139,7 +112,7 @@ struct MenuBarPopoverView: View {
 
                     Spacer()
 
-                    Button("Connect") {
+                    Button(l10n.t("连接", "Connect")) {
                         onClosePopover?()
                         store.launchMoonlight(target: target)
                     }
@@ -157,70 +130,6 @@ struct MenuBarPopoverView: View {
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
                         .stroke(AppTheme.subtleBorder, lineWidth: 1)
                 )
-            }
-        }
-    }
-
-    private var tunnelsSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text("GOST TUNNELS")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                Spacer()
-                if runningTunnelCount < tunnels.count {
-                    Button("Start All") {
-                        store.startAllTunnels()
-                    }
-                    .buttonStyle(.borderless)
-                    .font(.system(size: 10.5, weight: .medium))
-                    .foregroundStyle(AppTheme.accent)
-                } else if !tunnels.isEmpty {
-                    Button("Restart All") {
-                        store.restartAllActiveTunnels()
-                    }
-                    .buttonStyle(.borderless)
-                    .font(.system(size: 10.5, weight: .medium))
-                    .foregroundStyle(.secondary)
-                }
-            }
-
-            ForEach(tunnels) { item in
-                HStack(spacing: 8) {
-                    Circle()
-                        .fill(AppTheme.tunnelColor(item.state))
-                        .frame(width: 7, height: 7)
-
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(item.config.label)
-                            .font(.system(size: 11.5, weight: .medium))
-                            .lineLimit(1)
-                        Text(item.config.portSummary)
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-
-                    Spacer()
-
-                    Toggle(
-                        "",
-                        isOn: Binding(
-                            get: { item.isRunning || item.state == .starting },
-                            set: { wantRunning in
-                                if wantRunning {
-                                    store.startTunnel(item.config)
-                                } else {
-                                    store.stopTunnel(item.config)
-                                }
-                            }
-                        )
-                    )
-                    .labelsHidden()
-                    .toggleStyle(.switch)
-                    .controlSize(.mini)
-                }
-                .padding(.vertical, 3)
             }
         }
     }

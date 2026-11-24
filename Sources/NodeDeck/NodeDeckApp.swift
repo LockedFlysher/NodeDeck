@@ -178,7 +178,7 @@ final class NodeDeckAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        // Keep Menu Bar resident icon + GOST/UDP tunnels alive when dashboard window is closed.
+        // Keep Menu Bar resident icon & active SSH port forwards alive when dashboard window is closed.
         false
     }
 
@@ -262,13 +262,13 @@ struct NodeDeckApp: App {
                 .keyboardShortcut("v", modifiers: [.command, .shift])
                 .disabled(store.selectedSnapshot == nil || !store.isVSCodeInstalled)
 
-                Button("Stream Moonlight Desktop") {
+                Button("Stream Remote Desktop") {
                     if let host = store.selectedSnapshot?.host {
                         store.launchMoonlightDesktop(for: host)
                     }
                 }
                 .keyboardShortcut("d", modifiers: [.command, .shift])
-                .disabled(store.selectedSnapshot.map { !store.hasMoonlightTunnel(for: $0.host) } ?? true)
+                .disabled(store.selectedSnapshot.map { store.sunshineConfig(for: $0.host) == nil } ?? true)
 
                 Button("Copy SSH Command") {
                     if let host = store.selectedSnapshot?.host {
@@ -295,14 +295,6 @@ struct NodeDeckApp: App {
                     }
                 }
                 .keyboardShortcut("m", modifiers: [.command, .shift])
-                .disabled(store.selectedSnapshot == nil)
-
-                Button("Add GOST Tunnel…") {
-                    if let host = store.selectedSnapshot?.host {
-                        store.presentAddTunnel(for: host)
-                    }
-                }
-                .keyboardShortcut("t", modifiers: [.command, .shift])
                 .disabled(store.selectedSnapshot == nil)
             }
         }

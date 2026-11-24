@@ -100,16 +100,6 @@ extension HostMonitor {
                 }
             }
 
-            let matchingTunnels = tunnelConfigs.filter { aliasesLower.contains($0.hostAlias.lowercased()) }
-            if !matchingTunnels.isEmpty {
-                for tunnel in matchingTunnels {
-                    TunnelManager.shared.stop(id: tunnel.id)
-                }
-                tunnelConfigs.removeAll { aliasesLower.contains($0.hostAlias.lowercased()) }
-                persistTunnelConfigs(tunnelConfigs)
-                syncTunnelSnapshots()
-            }
-
             let matchingMounts = mountConfigs.filter { aliasesLower.contains($0.hostAlias.lowercased()) }
             if !matchingMounts.isEmpty {
                 let currentItems = mountItems(for: host)

@@ -28,9 +28,8 @@ struct HostDetailView: View {
 
     private var activeNetworkCount: Int {
         let forwards = store.portForwardItems(for: snapshot.host).filter(\.isRunning).count
-        let tunnels = store.tunnelItems(for: snapshot.host).filter(\.isRunning).count
         let paired = store.sunshineConfig(for: snapshot.host) != nil ? 1 : 0
-        return forwards + tunnels + paired
+        return forwards + paired
     }
 
     private var workspaceBadgeCount: Int {
@@ -67,7 +66,7 @@ struct HostDetailView: View {
                     }
 
                 case .desktopAndNetwork:
-                    TunnelSectionView(snapshot: snapshot)
+                    RemoteDesktopSectionView(snapshot: snapshot)
                     PortForwardSectionView(snapshot: snapshot)
 
                 case .workspace:

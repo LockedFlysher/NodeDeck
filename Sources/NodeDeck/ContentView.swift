@@ -59,11 +59,11 @@ struct ContentView: View {
             }
         } message: { host in
             let mountCount = store.mountItems(for: host).filter { $0.config != nil }.count
-            let tunnelCount = store.tunnelItems(for: host).count
-            let extra = (mountCount > 0 || tunnelCount > 0)
+            let forwardCount = store.portForwardItems(for: host).count
+            let extra = (mountCount > 0 || forwardCount > 0)
                 ? l10n.t(
-                    " 同时会移除该设备关联的 \(mountCount) 个挂载与 \(tunnelCount) 条隧道配置。",
-                    " This will also remove \(mountCount) saved mount(s) and \(tunnelCount) tunnel(s) for this device."
+                    " 同时会移除该设备关联的 \(mountCount) 个挂载与 \(forwardCount) 条端口转发配置。",
+                    " This will also remove \(mountCount) saved mount(s) and \(forwardCount) port forward(s) for this device."
                 )
                 : ""
             Text(l10n.t(

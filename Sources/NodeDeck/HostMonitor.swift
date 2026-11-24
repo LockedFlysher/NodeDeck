@@ -45,12 +45,7 @@ final class HostMonitor: ObservableObject {
     @Published var isShowingAddMountSheet = false
     @Published var editingMountConfig: FolderMountConfig?
 
-    // GOST tunnel & Launch at Login state
-    @Published var tunnelConfigs: [GostTunnelConfig] = []
-    @Published private(set) var allTunnelItems: [TunnelRuntimeItem] = []
-    @Published private(set) var isGostAvailable: Bool = false
-    @Published var isShowingTunnelSheet = false
-    @Published var editingTunnelConfig: GostTunnelConfig?
+    // Launch at Login state
     @Published private(set) var launchAtLogin: Bool = false
 
     // SSH Port Forwarding state
@@ -97,7 +92,6 @@ final class HostMonitor: ObservableObject {
     static let pinnedAliasesKey = "nodedeck.pinnedAliases"
     let configURL: URL
     private let mountsURL: URL
-    private let tunnelsURL: URL
     private var hasStarted = false
     private var isShuttingDown = false
     private var scanTask: Task<Void, Never>?
@@ -108,12 +102,10 @@ final class HostMonitor: ObservableObject {
 
     init(
         configURL: URL = SSHConfigParser.defaultConfigURL,
-        mountsURL: URL = MountManager.defaultConfigFileURL,
-        tunnelsURL: URL = TunnelManager.defaultConfigFileURL
+        mountsURL: URL = MountManager.defaultConfigFileURL
     ) {
         self.configURL = configURL
         self.mountsURL = mountsURL
-        self.tunnelsURL = tunnelsURL
         let storedInterval = UserDefaults.standard.double(forKey: Self.refreshIntervalKey)
         self.refreshInterval = storedInterval > 0 ? storedInterval : 30
         let storedPins = UserDefaults.standard.stringArray(forKey: Self.pinnedAliasesKey) ?? []
@@ -136,14 +128,6 @@ final class HostMonitor: ObservableObject {
 
     var gpuHostCount: Int {
         snapshots.values.filter { !($0.metrics?.gpus.isEmpty ?? true) }.count
-    }
-
-    var activeTunnelCount: Int {
-        allTunnelItems.filter(\.isRunning).count
-    }
-
-    var menuBarSymbol: String {
-        activeTunnelCount > 0 ? "terminal.fill" : "terminal"
     }
 
     func isPinned(_ alias: String) -> Bool {
@@ -172,10 +156,6 @@ final class HostMonitor: ObservableObject {
                     mountItems(for: host).contains(where: {
                         $0.label.localizedCaseInsensitiveContains(query) ||
                             $0.localPath.localizedCaseInsensitiveContains(query)
-                    }) ||
-                    tunnelItems(for: host).contains(where: {
-                        $0.config.label.localizedCaseInsensitiveContains(query) ||
-                            $0.config.portSummary.localizedCaseInsensitiveContains(query)
                     }) ||
                     vscodeItems(for: host).contains(where: {
                         $0.name.localizedCaseInsensitiveContains(query) ||
@@ -210,11 +190,6 @@ final class HostMonitor: ObservableObject {
         isShuttingDown = false
         launchAtLogin = LaunchAtLoginManager.isEnabled()
 
-        let loadedTunnels = TunnelManager.loadConfigs(from: tunnelsURL)
-        tunnelConfigs = loadedTunnels
-        isGostAvailable = TunnelManager.findGostExecutable() != nil
-        syncTunnelSnapshots()
-
         portForwardConfigs = PortForwardManager.loadConfigs()
         syncPortForwardSnapshots()
 
@@ -223,8 +198,6 @@ final class HostMonitor: ObservableObject {
         refreshLocalSunshineHostState()
 
         Task {
-            // Bring up auto-start GOST tunnels BEFORE probing SSH hosts & auto-mounting!
-            await ensureAutoStartTunnels()
             await ensureAutoStartPortForwards()
             reloadMounts()
             reloadVSCodeWorkspaces()
@@ -243,10 +216,8 @@ final class HostMonitor: ObservableObject {
         refreshTask = nil
         autoRefreshTask = nil
         feedbackDismissTask = nil
-        TunnelManager.shared.stopAll()
         PortForwardManager.shared.stopAll()
         MoonlightStreamWindowController.shared.closeCurrentWindow()
-        syncTunnelSnapshots()
         syncPortForwardSnapshots()
         hasStarted = false
     }
@@ -272,273 +243,17 @@ final class HostMonitor: ObservableObject {
         }
     }
 
-    // MARK: - GOST Tunnel Management
-
-    func syncTunnelSnapshots() {
-        let cfgs = tunnelConfigs
-        let items = TunnelManager.shared.snapshotItems(for: cfgs)
-        allTunnelItems = items
-        isGostAvailable = TunnelManager.findGostExecutable() != nil
-    }
-
-    func tunnelItems(for host: SSHHost) -> [TunnelRuntimeItem] {
-        allTunnelItems.filter { TunnelManager.shared.matchesHost($0.config, host: host) }
-    }
-
-    func activeTunnelCount(for host: SSHHost) -> Int {
-        tunnelItems(for: host).filter(\.isRunning).count
-    }
-
-    func hasMoonlightTunnel(for host: SSHHost) -> Bool {
-        sunshineConfig(for: host) != nil || moonlightTarget(for: host) != nil
-    }
+    // MARK: - Remote Desktop Targets
 
     var allMoonlightTargets: [MoonlightTarget] {
-        var targets: [MoonlightTarget] = []
-
-        // 1. Native paired hosts
-        for cfg in sunshineHostConfigs {
-            targets.append(
-                MoonlightTarget(
-                    hostAlias: cfg.hostAlias,
-                    title: cfg.hostAlias,
-                    subtitle: "\(cfg.address):\(cfg.httpPort)",
-                    streamEndpoint: "\(cfg.address):\(cfg.httpPort)",
-                    webURLString: cfg.webUIURLString,
-                    tunnelConfig: nil
-                )
-            )
-        }
-
-        // 2. GOST Moonlight tunnels
-        let pairedHosts = MoonlightLauncher.discoverPairedHosts()
-        for item in allTunnelItems where item.config.role == .moonlight {
-            let target = makeMoonlightTarget(from: item.config, pairedHosts: pairedHosts)
-            if !targets.contains(where: { $0.hostAlias.caseInsensitiveCompare(target.hostAlias) == .orderedSame }) {
-                targets.append(target)
-            }
-        }
-
-        return targets
-    }
-
-    func moonlightTarget(for host: SSHHost) -> MoonlightTarget? {
-        if let cfg = sunshineConfig(for: host) {
-            return MoonlightTarget(
-                hostAlias: host.alias,
-                title: host.alias,
+        sunshineHostConfigs.map { cfg in
+            MoonlightTarget(
+                hostAlias: cfg.hostAlias,
+                title: cfg.hostAlias,
                 subtitle: "\(cfg.address):\(cfg.httpPort)",
                 streamEndpoint: "\(cfg.address):\(cfg.httpPort)",
-                webURLString: cfg.webUIURLString,
-                tunnelConfig: nil
+                webURLString: cfg.webUIURLString
             )
-        }
-
-        let pairedHosts = MoonlightLauncher.discoverPairedHosts()
-        if let moonlightCfg = tunnelItems(for: host).first(where: { $0.config.role == .moonlight })?.config {
-            return makeMoonlightTarget(from: moonlightCfg, pairedHosts: pairedHosts)
-        }
-
-        let aliasesLower = host.allAliases.map { $0.lowercased() }
-        for item in allTunnelItems where item.config.role == .moonlight {
-            let tunnelAlias = item.config.hostAlias.lowercased()
-            if aliasesLower.contains(where: { $0.contains(tunnelAlias) || tunnelAlias.contains($0) }) {
-                return makeMoonlightTarget(from: item.config, pairedHosts: pairedHosts)
-            }
-        }
-
-        return nil
-    }
-
-    private func makeMoonlightTarget(
-        from config: GostTunnelConfig,
-        pairedHosts: [PairedMoonlightHost] = MoonlightLauncher.discoverPairedHosts()
-    ) -> MoonlightTarget {
-        let httpPort = config.moonlightHTTPPort ?? 47989
-        let webPort = config.sunshineWebPort ?? (httpPort + 1)
-
-        // Resolve the paired Moonlight computer name bound to 127.0.0.1:<httpPort> if available
-        let matchedPaired = pairedHosts.first { paired in
-            let isLoopback = paired.manualAddress == "127.0.0.1" || paired.localAddress == "127.0.0.1"
-            let portMatches = paired.effectiveHTTPPort == httpPort
-            return isLoopback && portMatches
-        }
-
-        let streamEndpoint = matchedPaired?.hostname ?? (config.moonlightStreamEndpoint ?? "127.0.0.1")
-        let displayTitle = matchedPaired.map { "\($0.hostname) Desktop" } ?? config.label
-
-        return MoonlightTarget(
-            hostAlias: config.hostAlias,
-            title: displayTitle,
-            subtitle: config.portSummary,
-            streamEndpoint: streamEndpoint,
-            webURLString: "https://127.0.0.1:\(webPort)",
-            tunnelConfig: config
-        )
-    }
-
-    private func attachExitHandler(for config: GostTunnelConfig) -> @Sendable () -> Void {
-        { [weak self] in
-            Task { @MainActor [weak self] in
-                self?.handleTunnelUnexpectedExit(config)
-            }
-        }
-    }
-
-    func ensureAutoStartTunnels() async {
-        guard isGostAvailable else { return }
-        let autoConfigs = tunnelConfigs.filter(\.autoStart)
-        guard !autoConfigs.isEmpty else { return }
-
-        await withTaskGroup(of: Void.self) { group in
-            for cfg in autoConfigs {
-                let onExit = attachExitHandler(for: cfg)
-                group.addTask {
-                    try? await TunnelManager.shared.start(config: cfg, onTermination: onExit)
-                }
-            }
-        }
-        syncTunnelSnapshots()
-    }
-
-    private func handleTunnelUnexpectedExit(_ config: GostTunnelConfig) {
-        syncTunnelSnapshots()
-        guard !isShuttingDown else { return }
-        guard let latest = tunnelConfigs.first(where: { $0.id == config.id }), latest.autoStart else {
-            return
-        }
-        let onExit = attachExitHandler(for: latest)
-        Task {
-            try? await Task.sleep(nanoseconds: 2_500_000_000)
-            guard !isShuttingDown else { return }
-            let snap = TunnelManager.shared.snapshotItems(for: [latest]).first
-            if snap?.isRunning != true && snap?.state != .starting {
-                try? await TunnelManager.shared.start(config: latest, onTermination: onExit)
-                syncTunnelSnapshots()
-            }
-        }
-    }
-
-    func startTunnel(_ config: GostTunnelConfig) {
-        let onExit = attachExitHandler(for: config)
-        Task {
-            syncTunnelSnapshots()
-            do {
-                try await TunnelManager.shared.start(config: config, onTermination: onExit)
-                syncTunnelSnapshots()
-                showFeedback(.success, "Started tunnel \"\(config.label)\".")
-                if let host = hosts.first(where: { TunnelManager.shared.matchesHost(config, host: $0) }) {
-                    refresh(alias: host.alias)
-                }
-            } catch {
-                syncTunnelSnapshots()
-                let msg = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-                showFeedback(.error, msg)
-            }
-        }
-    }
-
-    func stopTunnel(_ config: GostTunnelConfig) {
-        Task.detached(priority: .userInitiated) {
-            TunnelManager.shared.stop(id: config.id)
-            await MainActor.run {
-                self.syncTunnelSnapshots()
-                self.showFeedback(.info, "Stopped tunnel \"\(config.label)\".")
-            }
-        }
-    }
-
-    func restartTunnel(_ config: GostTunnelConfig) {
-        Task {
-            await Task.detached(priority: .userInitiated) {
-                TunnelManager.shared.stop(id: config.id)
-            }.value
-            syncTunnelSnapshots()
-            startTunnel(config)
-        }
-    }
-
-    func startAllTunnels() {
-        Task {
-            for cfg in tunnelConfigs {
-                let onExit = attachExitHandler(for: cfg)
-                try? await TunnelManager.shared.start(config: cfg, onTermination: onExit)
-            }
-            syncTunnelSnapshots()
-            showFeedback(.success, "All configured GOST tunnels started.")
-            refreshAll()
-        }
-    }
-
-    func restartAllActiveTunnels() {
-        Task {
-            let active = allTunnelItems.filter(\.isRunning).map(\.config)
-            for cfg in active {
-                let onExit = attachExitHandler(for: cfg)
-                TunnelManager.shared.stop(id: cfg.id)
-                try? await TunnelManager.shared.start(config: cfg, onTermination: onExit)
-            }
-            syncTunnelSnapshots()
-            showFeedback(.success, "Restarted \(active.count) GOST tunnel(s).")
-        }
-    }
-
-    func presentAddTunnel(for host: SSHHost) {
-        editingTunnelConfig = GostTunnelConfig(
-            hostAlias: host.alias,
-            label: "\(host.alias) Tunnel",
-            role: .ssh,
-            listenSpecs: ["tcp://127.0.0.1:2299/127.0.0.1:22"],
-            forwardChain: "relay+quic://user:token@203.0.113.10:18443?\(TunnelManager.defaultQuicQuery)",
-            autoStart: true
-        )
-        isShowingTunnelSheet = true
-    }
-
-    func presentEditTunnel(_ config: GostTunnelConfig) {
-        editingTunnelConfig = config
-        isShowingTunnelSheet = true
-    }
-
-    func saveTunnelConfig(_ config: GostTunnelConfig, startImmediately: Bool) {
-        var updated = tunnelConfigs
-        if let idx = updated.firstIndex(where: { $0.id == config.id }) {
-            updated[idx] = config
-        } else {
-            updated.append(config)
-        }
-        tunnelConfigs = updated
-        persistTunnelConfigs(updated)
-        isShowingTunnelSheet = false
-        editingTunnelConfig = nil
-        syncTunnelSnapshots()
-
-        if startImmediately {
-            restartTunnel(config)
-        } else {
-            showFeedback(.success, "Saved tunnel \"\(config.label)\".")
-        }
-    }
-
-    func toggleTunnelAutoStart(_ config: GostTunnelConfig) {
-        guard let idx = tunnelConfigs.firstIndex(where: { $0.id == config.id }) else { return }
-        tunnelConfigs[idx].autoStart.toggle()
-        persistTunnelConfigs(tunnelConfigs)
-        syncTunnelSnapshots()
-    }
-
-    func removeTunnelConfig(_ config: GostTunnelConfig) {
-        TunnelManager.shared.stop(id: config.id)
-        tunnelConfigs.removeAll { $0.id == config.id }
-        persistTunnelConfigs(tunnelConfigs)
-        syncTunnelSnapshots()
-        showFeedback(.info, "Removed tunnel \"\(config.label)\".")
-    }
-
-    func persistTunnelConfigs(_ configs: [GostTunnelConfig]) {
-        let url = tunnelsURL
-        Task.detached(priority: .utility) {
-            try? TunnelManager.saveConfigs(configs, to: url)
         }
     }
 
@@ -549,56 +264,31 @@ final class HostMonitor: ObservableObject {
                 address: cfg.address,
                 httpPort: cfg.httpPort
             )
-        } else if let target = moonlightTarget(for: host) {
-            launchMoonlight(target: target)
         } else {
             presentPairSunshine(for: host)
         }
     }
 
-    func launchMoonlightDesktop(using config: GostTunnelConfig) {
-        launchMoonlight(target: makeMoonlightTarget(from: config))
-    }
-
     func launchMoonlight(target: MoonlightTarget) {
-        Task {
-            if let config = target.tunnelConfig {
-                let onExit = attachExitHandler(for: config)
-                let item = TunnelManager.shared.snapshotItems(for: [config]).first
-                if item?.isRunning != true {
-                    do {
-                        try await TunnelManager.shared.start(config: config, onTermination: onExit)
-                        syncTunnelSnapshots()
-                    } catch {
-                        syncTunnelSnapshots()
-                        let msg = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-                        showFeedback(.error, msg)
-                        return
-                    }
-                }
-            }
+        if let cfg = sunshineHostConfigs.first(where: {
+            $0.hostAlias.caseInsensitiveCompare(target.hostAlias) == .orderedSame
+        }) {
+            launchNativeMoonlightStream(
+                hostAlias: target.hostAlias,
+                address: cfg.address,
+                httpPort: cfg.httpPort
+            )
+            return
+        }
 
-            if let cfg = sunshineHostConfigs.first(where: {
-                $0.hostAlias.caseInsensitiveCompare(target.hostAlias) == .orderedSame
-            }) {
-                launchNativeMoonlightStream(
-                    hostAlias: target.hostAlias,
-                    address: cfg.address,
-                    httpPort: cfg.httpPort
-                )
-                return
-            }
-
-            // Parse address:port from streamEndpoint or webURLString
-            let parts = target.streamEndpoint.split(separator: ":", maxSplits: 1).map(String.init)
-            if parts.count == 2, let port = Int(parts[1]) {
-                launchNativeMoonlightStream(hostAlias: target.hostAlias, address: parts[0], httpPort: port)
-            } else if let url = URL(string: target.webURLString), let host = url.host {
-                let httpPort = (url.port ?? 47990) - 1
-                launchNativeMoonlightStream(hostAlias: target.hostAlias, address: host, httpPort: httpPort)
-            } else {
-                showFeedback(.error, "No paired Sunshine endpoint found for \(target.hostAlias). Pair it in Remote Desktop first.")
-            }
+        let parts = target.streamEndpoint.split(separator: ":", maxSplits: 1).map(String.init)
+        if parts.count == 2, let port = Int(parts[1]) {
+            launchNativeMoonlightStream(hostAlias: target.hostAlias, address: parts[0], httpPort: port)
+        } else if let url = URL(string: target.webURLString), let host = url.host {
+            let httpPort = (url.port ?? 47990) - 1
+            launchNativeMoonlightStream(hostAlias: target.hostAlias, address: host, httpPort: httpPort)
+        } else {
+            showFeedback(.error, "No paired Sunshine endpoint found for \(target.hostAlias). Pair it in Remote Desktop first.")
         }
     }
 
@@ -626,8 +316,7 @@ final class HostMonitor: ObservableObject {
             for: host,
             rawEntries: vscodeRawEntries,
             allHosts: hosts,
-            mountConfigs: mountConfigs,
-            tunnelConfigs: tunnelConfigs
+            mountConfigs: mountConfigs
         )
     }
 
@@ -649,30 +338,8 @@ final class HostMonitor: ObservableObject {
         }
     }
 
-    private func ensureSSHTunnelRunningIfNeeded(for host: SSHHost) async -> Bool {
-        guard let sshCfg = tunnelItems(for: host).first(where: { $0.config.role == .ssh })?.config else {
-            return true
-        }
-        let item = TunnelManager.shared.snapshotItems(for: [sshCfg]).first
-        if item?.isRunning == true {
-            return true
-        }
-        let onExit = attachExitHandler(for: sshCfg)
-        do {
-            try await TunnelManager.shared.start(config: sshCfg, onTermination: onExit)
-            syncTunnelSnapshots()
-            return true
-        } catch {
-            syncTunnelSnapshots()
-            let msg = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-            showFeedback(.error, msg)
-            return false
-        }
-    }
-
     func openVSCodeWorkspace(_ item: VSCodeWorkspaceItem, for host: SSHHost, forceNewWindow: Bool = false) {
         Task {
-            guard await ensureSSHTunnelRunningIfNeeded(for: host) else { return }
             do {
                 try VSCodeManager.openWorkspace(item, forceNewWindow: forceNewWindow)
                 showFeedback(.success, "Opening \(item.name) (\(host.alias)) in VS Code…")
@@ -692,7 +359,6 @@ final class HostMonitor: ObservableObject {
         openVSCodePathTargetHost = nil
 
         Task {
-            guard await ensureSSHTunnelRunningIfNeeded(for: host) else { return }
             let kind: VSCodeWorkspaceKind = trimmed.hasSuffix(".code-workspace") ? .workspaceFile : .folder
             do {
                 try VSCodeManager.openRemotePath(
@@ -714,7 +380,6 @@ final class HostMonitor: ObservableObject {
 
     func openVSCodeEmptyWindow(for host: SSHHost) {
         Task {
-            guard await ensureSSHTunnelRunningIfNeeded(for: host) else { return }
             do {
                 try VSCodeManager.openEmptyHostWindow(authority: host.alias)
                 showFeedback(.success, "Connecting VS Code Remote-SSH to \(host.alias)…")
@@ -1024,7 +689,6 @@ final class HostMonitor: ObservableObject {
 
         reloadMounts()
         reloadVSCodeWorkspaces()
-        syncTunnelSnapshots()
 
         let url = configURL
         scanTask = Task {
@@ -1075,7 +739,6 @@ final class HostMonitor: ObservableObject {
 
         let hostsToProbe = hosts
         isRefreshing = true
-        syncTunnelSnapshots()
 
         for host in hostsToProbe {
             if var snapshot = snapshots[host.alias] {
@@ -1113,7 +776,6 @@ final class HostMonitor: ObservableObject {
 
             if !Task.isCancelled {
                 await autoMountOnlineHostsIfNeeded()
-                syncTunnelSnapshots()
                 isRefreshing = false
                 lastRefresh = Date()
             }
@@ -1128,7 +790,6 @@ final class HostMonitor: ObservableObject {
         snapshot.state = .checking
         snapshots[alias] = snapshot
         let host = snapshot.host
-        syncTunnelSnapshots()
 
         Task {
             await refreshMountStatus()

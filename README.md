@@ -21,7 +21,7 @@
 
 **NodeDeck** is a zero-cloud, local-first operations deck for GPU workstations, lab servers, mesh nodes, and HPC clusters — natively built for **macOS (SwiftUI + VideoToolbox)** and **Linux (GTK3 + FFmpeg VAAPI/CUDA + SDL2)**.
 
-It unifies OpenSSH device management, live CPU/GPU/Slurm/process telemetry, built-in hardware-accelerated Moonlight/Sunshine remote desktop streaming, SSH port forwarding, GOST tunnels, VS Code Remote-SSH workspaces, and Finder directory mounts in one lightweight desktop app — with **no cloud relay, no user accounts, and zero telemetry**.
+It unifies OpenSSH device management, live CPU/GPU/Slurm/process telemetry, built-in hardware-accelerated Moonlight/Sunshine remote desktop streaming, SSH port forwarding, VS Code Remote-SSH workspaces, and Finder directory mounts in one lightweight desktop app — with **no cloud relay, no user accounts, and zero telemetry**.
 
 ---
 
@@ -40,9 +40,8 @@ It unifies OpenSSH device management, live CPU/GPU/Slurm/process telemetry, buil
 - **Full SSH Device CRUD & Multiplexed Live Telemetry**
   - Add, edit, pin, filter, and delete hosts directly in `~/.ssh/config` (preserving comments, `Include` files, and custom directives).
   - Uses an isolated SSH `ControlMaster` socket (`/tmp/ndmux-<uid>/%C`, 60s idle auto-exit) for fast polling of CPU, RAM, swap, disk, NVIDIA & AMD GPUs, Slurm (`sinfo`) nodes, and **Top Processes with full command-line arguments**.
-- **SSH Port Forwarding (`-L` / `-R` / `-D`), GOST Tunnels, VS Code & Mounts**
+- **SSH Port Forwarding (`-L` / `-R` / `-D`), VS Code & Mounts**
   - One-click local/remote/SOCKS5 SSH port forwards (Jupyter, TensorBoard, WebUI, APIs) with auto-start and browser launch.
-  - Built-in GOST QUIC + direct POSIX UDP tunnel orchestration.
   - Automatic VS Code Remote-SSH workspace discovery and native macOS **SMB3 + `rclone nfsmount`** directory mounting into Finder.
 
 ---

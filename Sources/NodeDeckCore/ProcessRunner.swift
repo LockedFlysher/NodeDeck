@@ -120,3 +120,42 @@ public enum ProcessRunner {
         )
     }
 }
+
+public enum NetworkProbe {
+    public static func isTCPPortOpen(host: String = "127.0.0.1", port: Int, timeoutMs: Int32 = 250) -> Bool {
+        guard port > 0 && port <= 65535 else { return false }
+        let sock = socket(AF_INET, SOCK_STREAM, 0)
+        guard sock >= 0 else { return false }
+        defer { close(sock) }
+
+        let flags = fcntl(sock, F_GETFL, 0)
+        _ = fcntl(sock, F_SETFL, flags | O_NONBLOCK)
+
+        var addr = sockaddr_in()
+        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = in_port_t(UInt16(port).bigEndian)
+        guard inet_pton(AF_INET, host, &addr.sin_addr) == 1 else { return false }
+
+        let connectResult = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.connect(sock, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        if connectResult == 0 {
+            return true
+        }
+        guard errno == EINPROGRESS else { return false }
+
+        var pfd = pollfd(fd: sock, events: Int16(POLLOUT), revents: 0)
+        let polled = poll(&pfd, 1, timeoutMs)
+        guard polled > 0 else { return false }
+
+        var sockErr: Int32 = 0
+        var len = socklen_t(MemoryLayout<Int32>.size)
+        guard getsockopt(sock, SOL_SOCKET, SO_ERROR, &sockErr, &len) == 0 else {
+            return false
+        }
+        return sockErr == 0
+    }
+}

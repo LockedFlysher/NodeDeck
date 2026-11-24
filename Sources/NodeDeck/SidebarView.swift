@@ -348,9 +348,6 @@ struct SidebarView: View {
                     store.isShowingArchitectureGuide = true
                 }
                 Divider()
-                Button(l10n.t("启动全部 GOST 隧道", "Start All GOST Tunnels")) {
-                    store.startAllTunnels()
-                }
                 Button(l10n.t("重载 SSH 配置与挂载", "Reload SSH Config & Mounts")) {
                     store.reloadConfiguration()
                 }

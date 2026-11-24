@@ -40,19 +40,6 @@ enum AppTheme {
         }
     }
 
-    static func tunnelColor(_ state: TunnelRuntimeState) -> Color {
-        switch state {
-        case .running:
-            return Color(red: 0.16, green: 0.62, blue: 0.37)
-        case .starting:
-            return Color(red: 0.82, green: 0.54, blue: 0.13)
-        case .error:
-            return Color(red: 0.78, green: 0.25, blue: 0.27)
-        case .stopped:
-            return Color(nsColor: .tertiaryLabelColor)
-        }
-    }
-
     static func routeColor(_ route: SSHRouteKind) -> Color {
         switch route {
         case .localTunnel:

@@ -474,21 +474,7 @@ public enum MountManager {
                 config.label.isEmpty ? (localPath as NSString).lastPathComponent : config.label
             )
             let logFileURL = logDirectoryURL.appendingPathComponent("nodedeck-rclone-\(volName).log")
-            let dedicatedSFTPPort: String = {
-                let lower = selectedAlias.lowercased()
-                let configuredTunnels = TunnelManager.loadConfigs()
-                if let sftpTunnel = configuredTunnels.first(where: {
-                    $0.hostAlias.lowercased() == lower &&
-                        $0.role == .custom &&
-                        $0.label.localizedCaseInsensitiveContains("sftp")
-                }),
-                   let port = sftpTunnel.primaryLocalPort,
-                   TunnelManager.isTCPPortOpen(port: port, timeoutMs: 80) {
-                    return "-o Port=\(port) "
-                }
-                return ""
-            }()
-            let sshCommand = "/usr/bin/ssh \(dedicatedSFTPPort)-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ControlMaster=no -o IPQoS=none -o ConnectTimeout=8 -o ServerAliveInterval=15 -o ServerAliveCountMax=6 -o ClearAllForwardings=yes \(Shell.quote(selectedAlias))"
+            let sshCommand = "/usr/bin/ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ControlMaster=no -o IPQoS=none -o ConnectTimeout=8 -o ServerAliveInterval=15 -o ServerAliveCountMax=6 -o ClearAllForwardings=yes \(Shell.quote(selectedAlias))"
 
             let result = ProcessRunner.run(
                 executable: rclone,
@@ -543,7 +529,7 @@ public enum MountManager {
     }
 
     private static func isHostPortReachable(host: String, port: Int, timeoutMs: Int32) -> Bool {
-        if TunnelManager.isTCPPortOpen(host: host, port: port, timeoutMs: timeoutMs) {
+        if NetworkProbe.isTCPPortOpen(host: host, port: port, timeoutMs: timeoutMs) {
             return true
         }
         // Fallback for hostname / .local resolution when host is not a dotted IPv4 literal

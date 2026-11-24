@@ -177,169 +177,37 @@ final class NodeDeckCoreTests: XCTestCase {
         XCTAssertEqual(Shell.quote("my host"), "'my host'")
     }
 
-    func testTunnelConfigParsingAndRedaction() throws {
-        XCTAssertTrue(TunnelManager.defaultSeedConfigs().isEmpty)
+    func testNetworkProbeAndBundledHostPaths() throws {
+        // Bind a temporary TCP listener on loopback to verify NetworkProbe.isTCPPortOpen
+        let listenFD = socket(AF_INET, SOCK_STREAM, 0)
+        XCTAssertGreaterThanOrEqual(listenFD, 0)
+        defer { close(listenFD) }
 
-        let sshTunnel = GostTunnelConfig(
-            hostAlias: "gpu-node",
-            label: "GPU SSH (QUIC)",
-            role: .ssh,
-            listenSpecs: ["tcp://127.0.0.1:2222/127.0.0.1:22"],
-            forwardChain: "relay+quic://operator:example-token@198.51.100.10:18443?\(TunnelManager.defaultQuicQuery)",
-            autoStart: true
+        var addr = sockaddr_in()
+        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = 0
+        inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr)
+        XCTAssertEqual(
+            withUnsafePointer(to: &addr) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    Darwin.bind(listenFD, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                }
+            },
+            0
         )
-        XCTAssertEqual(sshTunnel.primaryLocalPort, 2222)
-        XCTAssertEqual(sshTunnel.portSummary, ":2222 → :22")
-        XCTAssertEqual(sshTunnel.redactedForwardEndpoint, "relay+quic://198.51.100.10:18443")
-
-        let moonlight = GostTunnelConfig(
-            hostAlias: "gpu-node",
-            label: "GPU Moonlight (NVENC)",
-            role: .moonlight,
-            listenSpecs: [
-                "tcp://127.0.0.1:47984/127.0.0.1:47984",
-                "tcp://127.0.0.1:47989/127.0.0.1:47989",
-                "tcp://127.0.0.1:47990/127.0.0.1:47990",
-                "tcp://127.0.0.1:48010/127.0.0.1:48010",
-                "udp-direct://127.0.0.1:47998/198.51.100.10:47998",
-                "udp-direct://127.0.0.1:47999/198.51.100.10:47999",
-                "udp-direct://127.0.0.1:48000/198.51.100.10:48000",
-                "udp-direct://127.0.0.1:48010/198.51.100.10:48010"
-            ],
-            forwardChain: "relay+quic://operator:example-token@198.51.100.10:18446?\(TunnelManager.defaultQuicQuery)",
-            autoStart: true
-        )
-        XCTAssertEqual(moonlight.primaryLocalPort, 47984)
-        XCTAssertEqual(moonlight.moonlightHTTPPort, 47989)
-        XCTAssertEqual(moonlight.redactedForwardEndpoint, "relay+quic://198.51.100.10:18446")
-        XCTAssertEqual(moonlight.directUDPRules.count, 4)
-        XCTAssertEqual(moonlight.gostListenSpecs.count, 4)
-
-        let moonlightArgs = TunnelManager.buildArguments(for: moonlight)
-        XCTAssertFalse(moonlightArgs.contains { $0.contains("udp-direct://") })
-        XCTAssertEqual(moonlightArgs.filter { $0 == "-L" }.count, 4)
-
-        let args = TunnelManager.buildArguments(for: sshTunnel)
-        XCTAssertEqual(args.first, "-L")
-        XCTAssertTrue(args.contains { $0.contains("retries=2") })
-        XCTAssertTrue(args.contains("-F"))
-    }
-
-    func testLegacyMoonlightUDPConfigMigration() {
-        let legacy = GostTunnelConfig(
-            hostAlias: "gpu-node",
-            label: "GPU Moonlight",
-            role: .moonlight,
-            listenSpecs: [
-                "tcp://127.0.0.1:47989/127.0.0.1:47989",
-                "udp://127.0.0.1:47998/127.0.0.1:47998",
-                "udp://127.0.0.1:47999/127.0.0.1:47999"
-            ],
-            forwardChain: "relay+quic://operator:secret@198.51.100.10:18446?keepalive=true"
-        )
-        let (migrated, didMigrate) = TunnelManager.migrateConfigsIfNeeded([legacy])
-        XCTAssertTrue(didMigrate)
-        XCTAssertEqual(migrated[0].directUDPRules.count, 2)
-        XCTAssertEqual(migrated[0].directUDPRules[0].remoteHost, "198.51.100.10")
-        XCTAssertEqual(migrated[0].directUDPRules[0].remotePort, 47998)
-        XCTAssertEqual(migrated[0].gostListenSpecs, ["tcp://127.0.0.1:47989/127.0.0.1:47989"])
-    }
-
-    func testDirectUDPRelayRoundTrip() throws {
-        // Bind a temporary UDP echo socket on loopback
-        let echoFD = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
-        XCTAssertGreaterThanOrEqual(echoFD, 0)
-        defer { close(echoFD) }
-
-        var echoAddr = sockaddr_in()
-        echoAddr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-        echoAddr.sin_family = sa_family_t(AF_INET)
-        echoAddr.sin_port = 0
-        inet_pton(AF_INET, "127.0.0.1", &echoAddr.sin_addr)
-        let bindRes = withUnsafePointer(to: &echoAddr) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                Darwin.bind(echoFD, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
-            }
-        }
-        XCTAssertEqual(bindRes, 0)
+        XCTAssertEqual(Darwin.listen(listenFD, 4), 0)
 
         var len = socklen_t(MemoryLayout<sockaddr_in>.size)
-        _ = withUnsafeMutablePointer(to: &echoAddr) {
+        _ = withUnsafeMutablePointer(to: &addr) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                getsockname(echoFD, $0, &len)
+                getsockname(listenFD, $0, &len)
             }
         }
-        let echoPort = Int(UInt16(bigEndian: echoAddr.sin_port))
-
-        // Pick a free relay local port
-        let probeFD = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
-        var probeAddr = echoAddr
-        probeAddr.sin_port = 0
-        _ = withUnsafePointer(to: &probeAddr) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                Darwin.bind(probeFD, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
-            }
-        }
-        _ = withUnsafeMutablePointer(to: &probeAddr) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                getsockname(probeFD, $0, &len)
-            }
-        }
-        let relayPort = Int(UInt16(bigEndian: probeAddr.sin_port))
-        close(probeFD)
-
-        let relay = try DirectUDPRelayEndpoint(
-            rule: .init(localHost: "127.0.0.1", localPort: relayPort, remoteHost: "127.0.0.1", remotePort: echoPort)
-        )
-        defer { relay.stop() }
-
-        let clientFD = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
-        defer { close(clientFD) }
-        var tv = timeval(tv_sec: 1, tv_usec: 0)
-        setsockopt(clientFD, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
-        setsockopt(echoFD, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
-
-        var relayAddr = sockaddr_in()
-        relayAddr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-        relayAddr.sin_family = sa_family_t(AF_INET)
-        relayAddr.sin_port = in_port_t(UInt16(relayPort).bigEndian)
-        inet_pton(AF_INET, "127.0.0.1", &relayAddr.sin_addr)
-
-        let payload = Array("MOONLIGHT_RTP_FRAME".utf8)
-        _ = payload.withUnsafeBytes { raw in
-            withUnsafePointer(to: &relayAddr) {
-                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                    Darwin.sendto(clientFD, raw.baseAddress, raw.count, 0, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
-                }
-            }
-        }
-
-        var peer = sockaddr_in()
-        var peerLen = socklen_t(MemoryLayout<sockaddr_in>.size)
-        var rxBuf = [UInt8](repeating: 0, count: 128)
-        let nEcho = rxBuf.withUnsafeMutableBytes { raw in
-            withUnsafeMutablePointer(to: &peer) {
-                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                    Darwin.recvfrom(echoFD, raw.baseAddress, raw.count, 0, $0, &peerLen)
-                }
-            }
-        }
-        XCTAssertEqual(nEcho, payload.count)
-
-        _ = rxBuf.withUnsafeBytes { raw in
-            withUnsafePointer(to: &peer) {
-                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                    Darwin.sendto(echoFD, raw.baseAddress, nEcho, 0, $0, peerLen)
-                }
-            }
-        }
-
-        var clientRx = [UInt8](repeating: 0, count: 128)
-        let nClient = clientRx.withUnsafeMutableBytes { raw in
-            Darwin.recvfrom(clientFD, raw.baseAddress, raw.count, 0, nil, nil)
-        }
-        XCTAssertEqual(nClient, payload.count)
-        XCTAssertEqual(Array(clientRx.prefix(nClient)), payload)
+        let openPort = Int(UInt16(bigEndian: addr.sin_port))
+        XCTAssertTrue(NetworkProbe.isTCPPortOpen(host: "127.0.0.1", port: openPort, timeoutMs: 250))
+        XCTAssertFalse(NetworkProbe.isTCPPortOpen(host: "127.0.0.1", port: 0, timeoutMs: 50))
+        XCTAssertTrue(SunshineHostManager.bundledBinaryPath.hasSuffix("Contents/Helpers/NodeDeckHost.app/Contents/MacOS/nodedeck-host"))
     }
 
     func testLaunchAtLoginPlistLifecycle() throws {

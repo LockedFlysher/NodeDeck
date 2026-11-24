@@ -43,48 +43,27 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         button.target = self
         button.action = #selector(handleStatusBarClick(_:))
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
-        updateBadge(tunnelItems: store?.allTunnelItems ?? [], onlineHosts: store?.onlineCount ?? 0, totalHosts: store?.hosts.count ?? 0)
+        updateBadge(onlineHosts: store?.onlineCount ?? 0, totalHosts: store?.hosts.count ?? 0)
     }
 
     private func bindStore(_ store: HostMonitor) {
-        Publishers.CombineLatest3(store.$allTunnelItems, store.$snapshots, store.$hosts)
+        Publishers.CombineLatest(store.$snapshots, store.$hosts)
             .receive(on: RunLoop.main)
-            .sink { [weak self] tunnelItems, snapshots, hosts in
+            .sink { [weak self] snapshots, hosts in
                 let online = snapshots.values.filter { $0.state == .online }.count
-                self?.updateBadge(tunnelItems: tunnelItems, onlineHosts: online, totalHosts: hosts.count)
+                self?.updateBadge(onlineHosts: online, totalHosts: hosts.count)
             }
             .store(in: &cancellables)
     }
 
-    private func updateBadge(tunnelItems: [TunnelRuntimeItem], onlineHosts: Int, totalHosts: Int) {
+    private func updateBadge(onlineHosts: Int, totalHosts: Int) {
         statusItem.isVisible = true
         guard let button = statusItem.button else { return }
         button.image = statusIcon
-
-        let activeTunnels = tunnelItems.filter(\.isRunning).count
-        let hasError = tunnelItems.contains { $0.state == .error }
-
-        if hasError {
-            button.title = " !"
-        } else if activeTunnels > 0 {
-            button.title = " \(activeTunnels)"
-        } else {
-            button.title = ""
-        }
+        button.title = ""
 
         let mountedCount = store?.mountedHostCount ?? 0
-        if tunnelItems.isEmpty {
-            button.toolTip = "NodeDeck · \(onlineHosts)/\(totalHosts) nodes online · \(mountedCount) mounted"
-        } else {
-            button.toolTip = "NodeDeck · \(onlineHosts)/\(totalHosts) nodes online · \(activeTunnels)/\(tunnelItems.count) tunnels active"
-        }
-
-        let winFrame = button.window?.frame ?? .zero
-        let btnFrame = button.frame
-        let statusLine = "isVisible=\(statusItem.isVisible) title='\(button.title)' btnFrame=\(btnFrame) winFrame=\(winFrame)\n"
-        let logURL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Logs/nodedeck-statusbar.log")
-        try? statusLine.data(using: .utf8)?.write(to: logURL, options: .atomic)
+        button.toolTip = "NodeDeck · \(onlineHosts)/\(totalHosts) nodes online · \(mountedCount) mounted"
     }
 
     @objc private func handleStatusBarClick(_ sender: AnyObject?) {
@@ -97,7 +76,6 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
 
     func showPopover() {
         guard let button = statusItem.button else { return }
-        store?.syncTunnelSnapshots()
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         popover.contentViewController?.view.window?.makeKey()
 

@@ -222,8 +222,7 @@ public enum VSCodeManager {
         for host: SSHHost,
         rawEntries: [VSCodeRawEntry],
         allHosts: [SSHHost] = [],
-        mountConfigs: [FolderMountConfig] = [],
-        tunnelConfigs: [GostTunnelConfig] = []
+        mountConfigs: [FolderMountConfig] = []
     ) -> [VSCodeWorkspaceItem] {
         let hostAliasesLower = Set(host.allAliases.map { $0.lowercased() })
         var byPath: [String: VSCodeWorkspaceItem] = [:]
@@ -233,8 +232,7 @@ public enum VSCodeManager {
                 entry: entry,
                 host: host,
                 allHosts: allHosts,
-                mountConfigs: mountConfigs,
-                tunnelConfigs: tunnelConfigs
+                mountConfigs: mountConfigs
             ) else { continue }
 
             // Preserve exact alias if it belongs to this SSHHost so VS Code focuses an already-open window
@@ -304,8 +302,7 @@ public enum VSCodeManager {
         entry: VSCodeRawEntry,
         host: SSHHost,
         allHosts: [SSHHost] = [],
-        mountConfigs: [FolderMountConfig] = [],
-        tunnelConfigs: [GostTunnelConfig] = []
+        mountConfigs: [FolderMountConfig] = []
     ) -> Bool {
         let authLower = entry.authorityHost.lowercased()
         let hostAliases = host.allAliases.map { $0.lowercased() }
@@ -322,23 +319,7 @@ public enum VSCodeManager {
             return true
         }
 
-        // 3. Match against tunnel relay upstream host associated exclusively with this host
-        let hostTunnelRelays = Set(
-            tunnelConfigs
-                .filter { hostAliases.contains($0.hostAlias.lowercased()) }
-                .compactMap { $0.forwardHost?.lowercased() }
-        )
-        let otherTunnelRelays = Set(
-            tunnelConfigs
-                .filter { !hostAliases.contains($0.hostAlias.lowercased()) }
-                .compactMap { $0.forwardHost?.lowercased() }
-        )
-        let exclusiveRelays = hostTunnelRelays.subtracting(otherTunnelRelays)
-        if exclusiveRelays.contains(authLower) {
-            return true
-        }
-
-        // 4. IP / HostName match (with user & mounted-directory prefix disambiguation for shared jump/FRP gateways)
+        // 3. IP / HostName match (with user & mounted-directory prefix disambiguation for shared jump/FRP gateways)
         let siblingGatewayHostNames = Set(
             allHosts
                 .filter { !distinctiveTokens(from: $0.allAliases).isDisjoint(with: hostDistinctTokens) }

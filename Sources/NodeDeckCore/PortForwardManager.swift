@@ -332,7 +332,7 @@ public final class PortForwardManager: @unchecked Sendable {
                 }
 
                 if config.direction == .local || config.direction == .dynamic {
-                    if TunnelManager.isTCPPortOpen(port: config.localPort, timeoutMs: 120) {
+                    if NetworkProbe.isTCPPortOpen(port: config.localPort, timeoutMs: 120) {
                         ready = true
                         break
                     }

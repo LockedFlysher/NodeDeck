@@ -664,246 +664,7 @@ public struct FolderMountItem: Identifiable, Hashable, Sendable {
     }
 }
 
-// MARK: - GOST Tunnel & Remote Desktop Models
-
-public enum TunnelRole: String, Codable, CaseIterable, Hashable, Sendable {
-    case ssh
-    case moonlight
-    case rdp
-    case custom
-
-    public var label: String {
-        switch self {
-        case .ssh: return "SSH"
-        case .moonlight: return "Moonlight"
-        case .rdp: return "RDP"
-        case .custom: return "Custom"
-        }
-    }
-
-    public var symbol: String {
-        switch self {
-        case .ssh: return "terminal.fill"
-        case .moonlight: return "display.2"
-        case .rdp: return "rectangle.on.rectangle"
-        case .custom: return "point.3.connected.trianglepath.dotted"
-        }
-    }
-}
-
-public struct GostTunnelConfig: Identifiable, Codable, Hashable, Sendable {
-    public var id: UUID
-    public var hostAlias: String
-    public var label: String
-    public var role: TunnelRole
-    public var listenSpecs: [String]
-    public var forwardChain: String
-    public var autoStart: Bool
-
-    public init(
-        id: UUID = UUID(),
-        hostAlias: String,
-        label: String,
-        role: TunnelRole = .ssh,
-        listenSpecs: [String],
-        forwardChain: String,
-        autoStart: Bool = true
-    ) {
-        self.id = id
-        self.hostAlias = hostAlias
-        self.label = label
-        self.role = role
-        self.listenSpecs = listenSpecs
-        self.forwardChain = forwardChain
-        self.autoStart = autoStart
-    }
-
-    public struct DirectUDPRule: Hashable, Sendable {
-        public let localHost: String
-        public let localPort: Int
-        public let remoteHost: String
-        public let remotePort: Int
-
-        public init(localHost: String, localPort: Int, remoteHost: String, remotePort: Int) {
-            self.localHost = localHost
-            self.localPort = localPort
-            self.remoteHost = remoteHost
-            self.remotePort = remotePort
-        }
-    }
-
-    public var gostListenSpecs: [String] {
-        listenSpecs
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty && !$0.lowercased().hasPrefix("udp-direct://") }
-    }
-
-    public var directUDPRules: [DirectUDPRule] {
-        listenSpecs.compactMap { Self.parseDirectUDPRule($0) }
-    }
-
-    public var primaryLocalPort: Int? {
-        for spec in listenSpecs where spec.lowercased().hasPrefix("tcp://") {
-            if let port = Self.extractLocalPort(from: spec) {
-                return port
-            }
-        }
-        for spec in listenSpecs {
-            if let port = Self.extractLocalPort(from: spec) {
-                return port
-            }
-        }
-        return nil
-    }
-
-    public var moonlightHTTPPort: Int? {
-        guard role == .moonlight else { return nil }
-        let tcpPorts = gostListenSpecs.compactMap { Self.extractLocalPort(from: $0) }
-        // In Sunshine's port layout, HTTP is base port (e.g. 47989 or 48989), HTTPS is base - 5, Web UI is base + 1
-        for port in tcpPorts where tcpPorts.contains(port - 5) && tcpPorts.contains(port + 1) {
-            return port
-        }
-        return tcpPorts.first { $0 % 100 == 89 } ?? primaryLocalPort
-    }
-
-    public var moonlightStreamEndpoint: String? {
-        guard let httpPort = moonlightHTTPPort else { return nil }
-        return httpPort == 47989 ? "127.0.0.1" : "127.0.0.1:\(httpPort)"
-    }
-
-    public var sunshineWebPort: Int? {
-        guard let httpPort = moonlightHTTPPort else { return nil }
-        return httpPort + 1
-    }
-
-    public var portSummary: String {
-        if role == .moonlight, listenSpecs.count > 2 {
-            let httpPort = moonlightHTTPPort ?? 47989
-            if !directUDPRules.isEmpty {
-                return "127.0.0.1:\(httpPort) · QUIC TCP + LAN UDP"
-            }
-            return "127.0.0.1:\(httpPort) · TCP+UDP Stream"
-        }
-        if let first = listenSpecs.first {
-            let stripped = first
-                .replacingOccurrences(of: "tcp://", with: "")
-                .replacingOccurrences(of: "udp-direct://", with: "UDP ")
-                .replacingOccurrences(of: "udp://", with: "UDP ")
-            let parts = stripped.split(separator: "/", maxSplits: 1).map(String.init)
-            if parts.count == 2 {
-                let lhs = parts[0].replacingOccurrences(of: "127.0.0.1:", with: ":")
-                let rhs = parts[1].replacingOccurrences(of: "127.0.0.1:", with: ":")
-                let extra = listenSpecs.count > 1 ? " (+\(listenSpecs.count - 1))" : ""
-                return "\(lhs) → \(rhs)\(extra)"
-            }
-            return stripped
-        }
-        return "Unconfigured"
-    }
-
-    public var forwardHost: String? {
-        guard let schemeRange = forwardChain.range(of: "://") else { return nil }
-        var remainder = String(forwardChain[schemeRange.upperBound...])
-        if let queryIdx = remainder.firstIndex(of: "?") {
-            remainder = String(remainder[..<queryIdx])
-        }
-        if let atIdx = remainder.lastIndex(of: "@") {
-            remainder = String(remainder[remainder.index(after: atIdx)...])
-        }
-        if let colonIdx = remainder.lastIndex(of: ":") {
-            let host = String(remainder[..<colonIdx])
-            return host.isEmpty ? nil : host
-        }
-        return remainder.isEmpty ? nil : remainder
-    }
-
-    public var redactedForwardEndpoint: String {
-        guard let schemeRange = forwardChain.range(of: "://") else {
-            return forwardChain
-        }
-        let scheme = String(forwardChain[..<schemeRange.lowerBound])
-        var remainder = String(forwardChain[schemeRange.upperBound...])
-        if let queryIdx = remainder.firstIndex(of: "?") {
-            remainder = String(remainder[..<queryIdx])
-        }
-        if let atIdx = remainder.lastIndex(of: "@") {
-            remainder = String(remainder[remainder.index(after: atIdx)...])
-        }
-        return "\(scheme)://\(remainder)"
-    }
-
-    public static func parseDirectUDPRule(_ spec: String) -> DirectUDPRule? {
-        let trimmed = spec.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.lowercased().hasPrefix("udp-direct://"),
-              let schemeEnd = trimmed.range(of: "://")?.upperBound
-        else { return nil }
-        var body = String(trimmed[schemeEnd...])
-        if let qIdx = body.firstIndex(of: "?") {
-            body = String(body[..<qIdx])
-        }
-        let parts = body.split(separator: "/", maxSplits: 1).map(String.init)
-        guard parts.count == 2,
-              let (lHost, lPort) = splitHostPort(parts[0]),
-              let (rHost, rPort) = splitHostPort(parts[1])
-        else { return nil }
-        return DirectUDPRule(localHost: lHost, localPort: lPort, remoteHost: rHost, remotePort: rPort)
-    }
-
-    private static func splitHostPort(_ endpoint: String) -> (String, Int)? {
-        guard let colon = endpoint.lastIndex(of: ":") else { return nil }
-        let host = String(endpoint[..<colon]).trimmingCharacters(in: .whitespaces)
-        guard !host.isEmpty,
-              let port = Int(endpoint[endpoint.index(after: colon)...]),
-              (1...65535).contains(port)
-        else { return nil }
-        return (host, port)
-    }
-
-    private static func extractLocalPort(from spec: String) -> Int? {
-        guard let schemeEnd = spec.range(of: "://")?.upperBound else { return nil }
-        var afterScheme = String(spec[schemeEnd...])
-        if let qIdx = afterScheme.firstIndex(of: "?") {
-            afterScheme = String(afterScheme[..<qIdx])
-        }
-        let bindPart = afterScheme.split(separator: "/", maxSplits: 1).first.map(String.init) ?? afterScheme
-        guard let colon = bindPart.lastIndex(of: ":") else { return nil }
-        return Int(bindPart[bindPart.index(after: colon)...])
-    }
-}
-
-public enum TunnelRuntimeState: String, Hashable, Sendable {
-    case stopped
-    case starting
-    case running
-    case error
-}
-
-public struct TunnelRuntimeItem: Identifiable, Hashable, Sendable {
-    public var id: UUID { config.id }
-    public let config: GostTunnelConfig
-    public let state: TunnelRuntimeState
-    public let pid: Int32?
-    public let portOpen: Bool
-    public let errorMessage: String?
-
-    public init(
-        config: GostTunnelConfig,
-        state: TunnelRuntimeState,
-        pid: Int32? = nil,
-        portOpen: Bool = false,
-        errorMessage: String? = nil
-    ) {
-        self.config = config
-        self.state = state
-        self.pid = pid
-        self.portOpen = portOpen
-        self.errorMessage = errorMessage
-    }
-
-    public var isRunning: Bool {
-        state == .running
-    }
-}
+// MARK: - Remote Desktop Models
 
 public struct MoonlightTarget: Identifiable, Hashable, Sendable {
     public var id: String { "\(hostAlias.lowercased())-\(streamEndpoint)" }
@@ -912,22 +673,19 @@ public struct MoonlightTarget: Identifiable, Hashable, Sendable {
     public let subtitle: String
     public let streamEndpoint: String
     public let webURLString: String
-    public let tunnelConfig: GostTunnelConfig?
 
     public init(
         hostAlias: String,
         title: String,
         subtitle: String,
         streamEndpoint: String,
-        webURLString: String,
-        tunnelConfig: GostTunnelConfig? = nil
+        webURLString: String
     ) {
         self.hostAlias = hostAlias
         self.title = title
         self.subtitle = subtitle
         self.streamEndpoint = streamEndpoint
         self.webURLString = webURLString
-        self.tunnelConfig = tunnelConfig
     }
 }
 
