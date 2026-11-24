@@ -59,7 +59,7 @@ public enum ClipboardSyncManager {
         let profiles = LinuxHostProfileManager.loadProfiles()
         guard let match = profiles.first(where: {
             $0.hostAlias.caseInsensitiveCompare(hostAlias) == .orderedSame
-        }), match.mode == .isolatedVirtualXorg else {
+        }), match.mode == .isolatedVirtualDesktop else {
             return nil
         }
         let d = sanitizedDisplay(match.display)
@@ -78,7 +78,7 @@ public enum ClipboardSyncManager {
         XRDIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
         [ -d "$XRDIR" ] && export XDG_RUNTIME_DIR="$XRDIR"
         if [ -z "$DISP" ] && [ -f "$HOME/.config/nodedeck/host-profile.json" ]; then
-          DISP=$(python3 -c 'import json,os; d=json.load(open(os.path.expanduser("~/.config/nodedeck/host-profile.json"))); print(d.get("display","") if d.get("mode")=="isolatedVirtualXorg" else "")' 2>/dev/null)
+          DISP=$(python3 -c 'import json,os; d=json.load(open(os.path.expanduser("~/.config/nodedeck/host-profile.json"))); print(d.get("display","") if d.get("mode")=="isolatedVirtualDesktop" else "")' 2>/dev/null)
         fi
         if [ -n "$DISP" ]; then
           dnum="${DISP#:}"; dnum="${dnum%%.*}"

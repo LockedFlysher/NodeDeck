@@ -1,2 +1,2 @@
-6cc13c877865178d5c1ef510ac4b0356f76ebe33a160d71a8982850bbffd798c  NodeDeck-macos-arm64.zip
+55a49d8320928fdea032f92f50d798aa1e51dd6a2edfdbc4c6bafcd463bcdcbd  NodeDeck-macos-arm64.zip
 6acca41258a361194075c278828c4e3b9426c31eaf075b1ddfb79b5955074fd8  nodedeck_2.0.0_amd64.deb
