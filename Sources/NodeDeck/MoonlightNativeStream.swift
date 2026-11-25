@@ -7,13 +7,124 @@ import NodeDeckCore
 import SwiftUI
 import VideoToolbox
 
-// MARK: - Singleton Active Session Bridge (for C function pointer callbacks)
+// MARK: - Singleton Active Session Bridge & Serialized Limelight Lifecycle
 
 private final class ActiveMoonlightBridge: @unchecked Sendable {
     static let shared = ActiveMoonlightBridge()
     let lock = NSLock()
     weak var session: MoonlightStreamSession?
     weak var pipeline: MoonlightMediaPipeline?
+    var generation: UInt64 = 0
+}
+
+/// Strictly serializes all global C `LiStartConnection` / `LiStopConnection` calls across
+/// the entire process and gates all `LiSend*` input calls so they can never race with
+/// `destroyInputStream()` / `initializeInputStream()` when switching resolution/refresh rate
+/// or closing/reopening stream windows.
+private final class LimelightLifecycle: @unchecked Sendable {
+    static let shared = LimelightLifecycle()
+
+    private let lifecycleQueue = DispatchQueue(label: "com.nodedeck.limelight.lifecycle", qos: .userInitiated)
+    private let inputLock = NSLock()
+    private var inputAllowed = false
+    private var hasActiveConnection = false // Only accessed on `lifecycleQueue`.
+
+    private let generationLock = NSLock()
+    private var currentGeneration: UInt64 = 0
+
+    func nextGeneration() -> UInt64 {
+        generationLock.withLock {
+            currentGeneration &+= 1
+            return currentGeneration
+        }
+    }
+
+    func isCurrent(generation: UInt64) -> Bool {
+        generationLock.withLock { currentGeneration == generation }
+    }
+
+    func setInputAllowed(_ allowed: Bool) {
+        inputLock.withLock {
+            inputAllowed = allowed
+        }
+    }
+
+    var isInputAllowed: Bool {
+        inputLock.withLock { inputAllowed }
+    }
+
+    /// Synchronously prevents any further `LiSend*` calls and interrupts an in-flight `LiStartConnection()`.
+    func interruptAndDisableInput() {
+        setInputAllowed(false)
+        LiInterruptConnection()
+    }
+
+    /// Runs `body` only while input is active and while holding `inputLock`, making it impossible
+    /// for `LiStopConnection()` to destroy `InputStream` queues underneath an in-flight input event.
+    func sendInput(_ body: () -> Void) {
+        inputLock.lock()
+        defer { inputLock.unlock() }
+        guard inputAllowed else { return }
+        body()
+    }
+
+    /// Waits on the global serial queue for any active C connection to stop cleanly.
+    func stopConnection() async {
+        interruptAndDisableInput()
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            lifecycleQueue.async {
+                self.setInputAllowed(false)
+                if self.hasActiveConnection {
+                    LiStopConnection()
+                    self.hasActiveConnection = false
+                }
+                continuation.resume()
+            }
+        }
+    }
+
+    /// Serializes `LiStartConnection()` after any prior `LiStopConnection()`.
+    /// Returns `nil` if `generation` was superseded before or during connection establishment.
+    func startConnection(
+        generation: UInt64,
+        beforeStart: @escaping @Sendable () -> Void,
+        startBlock: @escaping @Sendable () -> Int32
+    ) async -> Int32? {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Int32?, Never>) in
+            lifecycleQueue.async {
+                self.setInputAllowed(false)
+                if self.hasActiveConnection {
+                    LiStopConnection()
+                    self.hasActiveConnection = false
+                }
+
+                guard self.isCurrent(generation: generation) else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+
+                beforeStart()
+                self.hasActiveConnection = true
+                let rc = startBlock()
+                if rc == 0 {
+                    if self.isCurrent(generation: generation) {
+                        self.setInputAllowed(true)
+                        continuation.resume(returning: 0)
+                    } else {
+                        self.setInputAllowed(false)
+                        LiStopConnection()
+                        self.hasActiveConnection = false
+                        continuation.resume(returning: nil)
+                    }
+                } else {
+                    // LiStartConnection's internal Cleanup path already invokes LiStopConnection().
+                    self.setInputAllowed(false)
+                    self.hasActiveConnection = false
+                    continuation.resume(returning: rc)
+                }
+            }
+        }
+    }
 }
 
 // MARK: - Stream Performance Snapshot
@@ -599,7 +710,8 @@ final class MoonlightStreamSession: ObservableObject {
     private var currentHTTPPort: Int = 47989
     private var currentAppTitle: String = "Desktop"
     private var isStopping = false
-    private var pendingStopTask: Task<Void, Never>?
+    private var launchTask: Task<Void, Never>?
+    private var activeGeneration: UInt64 = 0
     private var clipboardPollTask: Task<Void, Never>?
     private var lastSyncedChangeCount: Int = NSPasteboard.general.changeCount
     private var lastSyncedText: String?
@@ -645,8 +757,9 @@ final class MoonlightStreamSession: ObservableObject {
         bitrateKbps: Int? = nil,
         enablePrivacyScreen: Bool = false
     ) {
-        stop(quitRemoteApp: false)
-        let previousStop = pendingStopTask
+        stop(quitRemoteApp: false, restorePrivacyScreen: !enablePrivacyScreen)
+        let myGen = LimelightLifecycle.shared.nextGeneration()
+        activeGeneration = myGen
         isStopping = false
         errorMessage = nil
         sshHostAlias = hostAlias
@@ -667,8 +780,11 @@ final class MoonlightStreamSession: ObservableObject {
         stats = StreamPerformanceStats(codec: "Connecting…", resolution: "\(width)×\(height)", fps: 0)
         state = .connecting("Negotiating with Sunshine (\(address):\(httpPort))…")
 
-        Task {
-            await previousStop?.value
+        launchTask = Task { [weak self] in
+            guard let self else { return }
+            await LimelightLifecycle.shared.stopConnection()
+            guard !Task.isCancelled, LimelightLifecycle.shared.isCurrent(generation: myGen) else { return }
+
             do {
                 let launched = try await SunshineClient.shared.launchStream(
                     address: address,
@@ -678,17 +794,21 @@ final class MoonlightStreamSession: ObservableObject {
                     height: height,
                     fps: fps
                 )
+                guard !Task.isCancelled, LimelightLifecycle.shared.isCurrent(generation: myGen) else { return }
+
                 self.activeLaunchSession = launched
                 self.streamTitle = "\(hostAlias ?? address) · \(launched.appTitle)"
                 self.state = .connecting("Starting native Moonlight stream (\(width)×\(height) @ \(fps)Hz)…")
 
-                try await startLimelightConnection(
+                let started = try await startLimelightConnection(
+                    generation: myGen,
                     session: launched,
                     width: width,
                     height: height,
                     fps: fps,
                     bitrateKbps: resolvedBitrateKbps
                 )
+                guard started, !Task.isCancelled, LimelightLifecycle.shared.isCurrent(generation: myGen) else { return }
 
                 self.updateClipboardAutoSyncTask()
 
@@ -696,6 +816,7 @@ final class MoonlightStreamSession: ObservableObject {
                     await setPrivacyScreen(enabled: true)
                 }
             } catch {
+                guard !Task.isCancelled, LimelightLifecycle.shared.isCurrent(generation: myGen) else { return }
                 let msg = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
                 self.errorMessage = msg
                 self.state = .disconnected(msg)
@@ -913,15 +1034,19 @@ final class MoonlightStreamSession: ObservableObject {
         }
     }
 
-    func stop(quitRemoteApp: Bool) {
+    func stop(quitRemoteApp: Bool, restorePrivacyScreen: Bool = true) {
         guard !isStopping else { return }
         isStopping = true
+        _ = LimelightLifecycle.shared.nextGeneration()
+        LimelightLifecycle.shared.interruptAndDisableInput()
+        launchTask?.cancel()
+        launchTask = nil
         clipboardPollTask?.cancel()
         clipboardPollTask = nil
         relativeMouseEnabled = false
 
         let launched = activeLaunchSession
-        let restoreAlias = isPrivacyScreenEnabled ? sshHostAlias : nil
+        let restoreAlias = (restorePrivacyScreen && isPrivacyScreenEnabled) ? sshHostAlias : nil
         activeLaunchSession = nil
         isPrivacyScreenEnabled = false
 
@@ -932,8 +1057,8 @@ final class MoonlightStreamSession: ObservableObject {
             }
         }
 
-        pendingStopTask = Task.detached(priority: .userInitiated) {
-            LiStopConnection()
+        Task.detached(priority: .userInitiated) {
+            await LimelightLifecycle.shared.stopConnection()
             if let alias = restoreAlias {
                 let probe = ProcessRunner.run(
                     executable: "/usr/bin/ssh",
@@ -960,111 +1085,138 @@ final class MoonlightStreamSession: ObservableObject {
         isStopping = false
     }
 
+    func handleRemoteTermination(errorCode: Int32) {
+        let gen = activeGeneration
+        guard LimelightLifecycle.shared.isCurrent(generation: gen) else { return }
+        LimelightLifecycle.shared.setInputAllowed(false)
+        let msg = errorCode == 0 ? nil : "Stream terminated (error \(errorCode))."
+        errorMessage = msg
+        state = .disconnected(msg)
+        Task.detached(priority: .userInitiated) {
+            await LimelightLifecycle.shared.stopConnection()
+        }
+    }
+
     func sendCtrlAltDel() {
         let mods = Int8(MODIFIER_CTRL | MODIFIER_ALT)
-        LiSendKeyboardEvent(0x2E, Int8(KEY_ACTION_DOWN), mods)
-        DispatchQueue.global(qos: .userInteractive).asyncAfter(deadline: .now() + 0.05) {
-            LiSendKeyboardEvent(0x2E, Int8(KEY_ACTION_UP), mods)
+        LimelightLifecycle.shared.sendInput {
+            LiSendKeyboardEvent(0x2E, Int8(KEY_ACTION_DOWN), mods)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            LimelightLifecycle.shared.sendInput {
+                LiSendKeyboardEvent(0x2E, Int8(KEY_ACTION_UP), mods)
+            }
         }
     }
 
     // MARK: - Limelight Connection Setup
 
     private func startLimelightConnection(
+        generation: UInt64,
         session: SunshineLaunchSession,
         width: Int,
         height: Int,
         fps: Int,
         bitrateKbps: Int
-    ) async throws {
-        ActiveMoonlightBridge.shared.lock.withLock {
-            ActiveMoonlightBridge.shared.session = self
-            ActiveMoonlightBridge.shared.pipeline = pipeline
-        }
-
-        let rc: Int32 = await Task.detached(priority: .userInitiated) {
-            var serverInfo = SERVER_INFORMATION()
-            LiInitializeServerInformation(&serverInfo)
-
-            var streamConfig = STREAM_CONFIGURATION()
-            LiInitializeStreamConfiguration(&streamConfig)
-            streamConfig.width = Int32(width)
-            streamConfig.height = Int32(height)
-            streamConfig.fps = Int32(fps)
-            streamConfig.clientRefreshRateX100 = Int32(fps * 100)
-            streamConfig.bitrate = Int32(bitrateKbps)
-            streamConfig.packetSize = 1392
-            streamConfig.streamingRemotely = STREAM_CFG_AUTO
-            streamConfig.audioConfiguration = 0x000302CA
-            streamConfig.supportedVideoFormats = Int32(VIDEO_FORMAT_H265 | VIDEO_FORMAT_H264)
-            streamConfig.colorSpace = COLORSPACE_REC_709
-            streamConfig.colorRange = COLOR_RANGE_LIMITED
-
-            withUnsafeMutableBytes(of: &streamConfig.remoteInputAesKey) { dst in
-                session.rikey.withUnsafeBytes { src in
-                    let count = min(dst.count, src.count)
-                    dst.copyMemory(from: UnsafeRawBufferPointer(start: src.baseAddress, count: count))
+    ) async throws -> Bool {
+        let pipelineRef = pipeline
+        let rc = await LimelightLifecycle.shared.startConnection(
+            generation: generation,
+            beforeStart: { [weak self] in
+                ActiveMoonlightBridge.shared.lock.withLock {
+                    ActiveMoonlightBridge.shared.session = self
+                    ActiveMoonlightBridge.shared.pipeline = pipelineRef
+                    ActiveMoonlightBridge.shared.generation = generation
                 }
-            }
+            },
+            startBlock: {
+                var serverInfo = SERVER_INFORMATION()
+                LiInitializeServerInformation(&serverInfo)
 
-            var bigKeyId = UInt32(bitPattern: session.rikeyId).bigEndian
-            withUnsafeMutableBytes(of: &streamConfig.remoteInputAesIv) { dst in
-                withUnsafeBytes(of: &bigKeyId) { src in
-                    dst.copyMemory(from: UnsafeRawBufferPointer(start: src.baseAddress, count: 4))
+                var streamConfig = STREAM_CONFIGURATION()
+                LiInitializeStreamConfiguration(&streamConfig)
+                streamConfig.width = Int32(width)
+                streamConfig.height = Int32(height)
+                streamConfig.fps = Int32(fps)
+                streamConfig.clientRefreshRateX100 = Int32(fps * 100)
+                streamConfig.bitrate = Int32(bitrateKbps)
+                streamConfig.packetSize = 1392
+                streamConfig.streamingRemotely = STREAM_CFG_AUTO
+                streamConfig.audioConfiguration = 0x000302CA
+                streamConfig.supportedVideoFormats = Int32(VIDEO_FORMAT_H265 | VIDEO_FORMAT_H264)
+                streamConfig.colorSpace = COLORSPACE_REC_709
+                streamConfig.colorRange = COLOR_RANGE_LIMITED
+
+                withUnsafeMutableBytes(of: &streamConfig.remoteInputAesKey) { dst in
+                    session.rikey.withUnsafeBytes { src in
+                        let count = min(dst.count, src.count)
+                        dst.copyMemory(from: UnsafeRawBufferPointer(start: src.baseAddress, count: count))
+                    }
                 }
-            }
 
-            var drCallbacks = DECODER_RENDERER_CALLBACKS()
-            LiInitializeVideoCallbacks(&drCallbacks)
-            drCallbacks.setup = moonlightVideoSetup
-            drCallbacks.cleanup = moonlightVideoCleanup
-            drCallbacks.submitDecodeUnit = moonlightSubmitDecodeUnit
-            drCallbacks.capabilities = Int32(CAPABILITY_DIRECT_SUBMIT)
+                var bigKeyId = UInt32(bitPattern: session.rikeyId).bigEndian
+                withUnsafeMutableBytes(of: &streamConfig.remoteInputAesIv) { dst in
+                    withUnsafeBytes(of: &bigKeyId) { src in
+                        dst.copyMemory(from: UnsafeRawBufferPointer(start: src.baseAddress, count: 4))
+                    }
+                }
 
-            var arCallbacks = AUDIO_RENDERER_CALLBACKS()
-            LiInitializeAudioCallbacks(&arCallbacks)
-            arCallbacks.`init` = moonlightAudioInit
-            arCallbacks.cleanup = moonlightAudioCleanup
-            arCallbacks.decodeAndPlaySample = moonlightAudioDecodeAndPlay
-            arCallbacks.capabilities = Int32(CAPABILITY_DIRECT_SUBMIT)
+                var drCallbacks = DECODER_RENDERER_CALLBACKS()
+                LiInitializeVideoCallbacks(&drCallbacks)
+                drCallbacks.setup = moonlightVideoSetup
+                drCallbacks.cleanup = moonlightVideoCleanup
+                drCallbacks.submitDecodeUnit = moonlightSubmitDecodeUnit
+                drCallbacks.capabilities = Int32(CAPABILITY_DIRECT_SUBMIT)
 
-            var clCallbacks = CONNECTION_LISTENER_CALLBACKS()
-            LiInitializeConnectionCallbacks(&clCallbacks)
-            clCallbacks.stageStarting = moonlightStageStarting
-            clCallbacks.stageFailed = moonlightStageFailed
-            clCallbacks.connectionStarted = moonlightConnectionStarted
-            clCallbacks.connectionTerminated = moonlightConnectionTerminated
+                var arCallbacks = AUDIO_RENDERER_CALLBACKS()
+                LiInitializeAudioCallbacks(&arCallbacks)
+                arCallbacks.`init` = moonlightAudioInit
+                arCallbacks.cleanup = moonlightAudioCleanup
+                arCallbacks.decodeAndPlaySample = moonlightAudioDecodeAndPlay
+                arCallbacks.capabilities = Int32(CAPABILITY_DIRECT_SUBMIT)
 
-            return session.address.withCString { addrCStr in
-                session.appVersion.withCString { appVerCStr in
-                    session.gfeVersion.withCString { gfeVerCStr in
-                        session.rtspSessionURL.withCString { rtspCStr in
-                            serverInfo.address = addrCStr
-                            serverInfo.serverInfoAppVersion = appVerCStr
-                            serverInfo.serverInfoGfeVersion = gfeVerCStr
-                            serverInfo.rtspSessionUrl = rtspCStr
-                            serverInfo.serverCodecModeSupport = Int32(session.serverCodecModeSupport)
+                var clCallbacks = CONNECTION_LISTENER_CALLBACKS()
+                LiInitializeConnectionCallbacks(&clCallbacks)
+                clCallbacks.stageStarting = moonlightStageStarting
+                clCallbacks.stageFailed = moonlightStageFailed
+                clCallbacks.connectionStarted = moonlightConnectionStarted
+                clCallbacks.connectionTerminated = moonlightConnectionTerminated
 
-                            return LiStartConnection(
-                                &serverInfo,
-                                &streamConfig,
-                                &clCallbacks,
-                                &drCallbacks,
-                                &arCallbacks,
-                                nil,
-                                0,
-                                nil,
-                                0
-                            )
+                return session.address.withCString { addrCStr in
+                    session.appVersion.withCString { appVerCStr in
+                        session.gfeVersion.withCString { gfeVerCStr in
+                            session.rtspSessionURL.withCString { rtspCStr in
+                                serverInfo.address = addrCStr
+                                serverInfo.serverInfoAppVersion = appVerCStr
+                                serverInfo.serverInfoGfeVersion = gfeVerCStr
+                                serverInfo.rtspSessionUrl = rtspCStr
+                                serverInfo.serverCodecModeSupport = Int32(session.serverCodecModeSupport)
+
+                                return LiStartConnection(
+                                    &serverInfo,
+                                    &streamConfig,
+                                    &clCallbacks,
+                                    &drCallbacks,
+                                    &arCallbacks,
+                                    nil,
+                                    0,
+                                    nil,
+                                    0
+                                )
+                            }
                         }
                     }
                 }
             }
-        }.value
+        )
 
+        guard let rc else {
+            return false
+        }
         if rc != 0 {
             throw SunshineError.launchFailed("LiStartConnection returned error code \(rc).")
         }
+        return true
     }
 }
 
@@ -1111,16 +1263,24 @@ private func moonlightAudioDecodeAndPlay(_ sampleData: UnsafeMutablePointer<CCha
 
 private func moonlightStageStarting(_ stage: Int32) {
     let name = LiGetStageName(stage).map { String(cString: $0) } ?? "Stage \(stage)"
-    let session = ActiveMoonlightBridge.shared.lock.withLock { ActiveMoonlightBridge.shared.session }
+    let (session, gen) = ActiveMoonlightBridge.shared.lock.withLock {
+        (ActiveMoonlightBridge.shared.session, ActiveMoonlightBridge.shared.generation)
+    }
+    guard LimelightLifecycle.shared.isCurrent(generation: gen) else { return }
     Task { @MainActor in
+        guard LimelightLifecycle.shared.isCurrent(generation: gen) else { return }
         session?.state = .connecting("Connecting: \(name)…")
     }
 }
 
 private func moonlightStageFailed(_ stage: Int32, _ errorCode: Int32) {
     let name = LiGetStageName(stage).map { String(cString: $0) } ?? "Stage \(stage)"
-    let session = ActiveMoonlightBridge.shared.lock.withLock { ActiveMoonlightBridge.shared.session }
+    let (session, gen) = ActiveMoonlightBridge.shared.lock.withLock {
+        (ActiveMoonlightBridge.shared.session, ActiveMoonlightBridge.shared.generation)
+    }
+    guard LimelightLifecycle.shared.isCurrent(generation: gen) else { return }
     Task { @MainActor in
+        guard LimelightLifecycle.shared.isCurrent(generation: gen) else { return }
         let msg = "\(name) failed (error \(errorCode))."
         session?.errorMessage = msg
         session?.state = .disconnected(msg)
@@ -1128,18 +1288,25 @@ private func moonlightStageFailed(_ stage: Int32, _ errorCode: Int32) {
 }
 
 private func moonlightConnectionStarted() {
-    let session = ActiveMoonlightBridge.shared.lock.withLock { ActiveMoonlightBridge.shared.session }
+    let (session, gen) = ActiveMoonlightBridge.shared.lock.withLock {
+        (ActiveMoonlightBridge.shared.session, ActiveMoonlightBridge.shared.generation)
+    }
+    guard LimelightLifecycle.shared.isCurrent(generation: gen) else { return }
     Task { @MainActor in
+        guard LimelightLifecycle.shared.isCurrent(generation: gen) else { return }
         session?.state = .streaming
     }
 }
 
 private func moonlightConnectionTerminated(_ errorCode: Int32) {
-    let session = ActiveMoonlightBridge.shared.lock.withLock { ActiveMoonlightBridge.shared.session }
+    LimelightLifecycle.shared.setInputAllowed(false)
+    let (session, gen) = ActiveMoonlightBridge.shared.lock.withLock {
+        (ActiveMoonlightBridge.shared.session, ActiveMoonlightBridge.shared.generation)
+    }
+    guard LimelightLifecycle.shared.isCurrent(generation: gen) else { return }
     Task { @MainActor in
-        let msg = errorCode == 0 ? nil : "Stream terminated (error \(errorCode))."
-        session?.errorMessage = msg
-        session?.state = .disconnected(msg)
+        guard LimelightLifecycle.shared.isCurrent(generation: gen) else { return }
+        session?.handleRemoteTermination(errorCode: errorCode)
     }
 }
 
@@ -1283,11 +1450,14 @@ private final class MoonlightCanvasNSView: NSView {
     }
 
     private func sendMouseMotion(from event: NSEvent) {
+        guard LimelightLifecycle.shared.isInputAllowed else { return }
         if relativeMouseEnabled {
             let dx = Int16(clamping: Int(event.deltaX.rounded()))
             let dy = Int16(clamping: Int(event.deltaY.rounded()))
             if dx != 0 || dy != 0 {
-                LiSendMouseMoveEvent(dx, dy)
+                LimelightLifecycle.shared.sendInput {
+                    LiSendMouseMoveEvent(dx, dy)
+                }
             }
             return
         }
@@ -1299,7 +1469,14 @@ private final class MoonlightCanvasNSView: NSView {
         let relY = rect.maxY - pt.y
         let x = max(0, min(w - 1, Int(relX)))
         let y = max(0, min(h - 1, Int(relY)))
-        _ = LiSendMousePositionEvent(Int16(x), Int16(y), Int16(w), Int16(h))
+        LimelightLifecycle.shared.sendInput {
+            _ = LiSendMousePositionEvent(
+                Int16(clamping: x),
+                Int16(clamping: y),
+                Int16(clamping: w),
+                Int16(clamping: h)
+            )
+        }
     }
 
     private func sendAbsolutePositionIfNeeded(from event: NSEvent) {
@@ -1316,23 +1493,31 @@ private final class MoonlightCanvasNSView: NSView {
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         sendAbsolutePositionIfNeeded(from: event)
-        LiSendMouseButtonEvent(Int8(BUTTON_ACTION_PRESS), Int32(BUTTON_LEFT))
+        LimelightLifecycle.shared.sendInput {
+            LiSendMouseButtonEvent(Int8(BUTTON_ACTION_PRESS), Int32(BUTTON_LEFT))
+        }
     }
 
     override func mouseUp(with event: NSEvent) {
         sendAbsolutePositionIfNeeded(from: event)
-        LiSendMouseButtonEvent(Int8(BUTTON_ACTION_RELEASE), Int32(BUTTON_LEFT))
+        LimelightLifecycle.shared.sendInput {
+            LiSendMouseButtonEvent(Int8(BUTTON_ACTION_RELEASE), Int32(BUTTON_LEFT))
+        }
     }
 
     override func rightMouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         sendAbsolutePositionIfNeeded(from: event)
-        LiSendMouseButtonEvent(Int8(BUTTON_ACTION_PRESS), Int32(BUTTON_RIGHT))
+        LimelightLifecycle.shared.sendInput {
+            LiSendMouseButtonEvent(Int8(BUTTON_ACTION_PRESS), Int32(BUTTON_RIGHT))
+        }
     }
 
     override func rightMouseUp(with event: NSEvent) {
         sendAbsolutePositionIfNeeded(from: event)
-        LiSendMouseButtonEvent(Int8(BUTTON_ACTION_RELEASE), Int32(BUTTON_RIGHT))
+        LimelightLifecycle.shared.sendInput {
+            LiSendMouseButtonEvent(Int8(BUTTON_ACTION_RELEASE), Int32(BUTTON_RIGHT))
+        }
     }
 
     private func moonlightButton(for buttonNumber: Int) -> Int32 {
@@ -1347,22 +1532,33 @@ private final class MoonlightCanvasNSView: NSView {
     override func otherMouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         sendAbsolutePositionIfNeeded(from: event)
-        LiSendMouseButtonEvent(Int8(BUTTON_ACTION_PRESS), moonlightButton(for: event.buttonNumber))
+        let btn = moonlightButton(for: event.buttonNumber)
+        LimelightLifecycle.shared.sendInput {
+            LiSendMouseButtonEvent(Int8(BUTTON_ACTION_PRESS), btn)
+        }
     }
 
     override func otherMouseUp(with event: NSEvent) {
         sendAbsolutePositionIfNeeded(from: event)
-        LiSendMouseButtonEvent(Int8(BUTTON_ACTION_RELEASE), moonlightButton(for: event.buttonNumber))
+        let btn = moonlightButton(for: event.buttonNumber)
+        LimelightLifecycle.shared.sendInput {
+            LiSendMouseButtonEvent(Int8(BUTTON_ACTION_RELEASE), btn)
+        }
     }
 
     override func scrollWheel(with event: NSEvent) {
+        guard LimelightLifecycle.shared.isInputAllowed else { return }
         let dy = Int16(clamping: Int(event.scrollingDeltaY * (event.hasPreciseScrollingDeltas ? 2.0 : 120.0)))
         if dy != 0 {
-            LiSendHighResScrollEvent(dy)
+            LimelightLifecycle.shared.sendInput {
+                LiSendHighResScrollEvent(dy)
+            }
         }
         let dx = Int16(clamping: Int(-event.scrollingDeltaX * (event.hasPreciseScrollingDeltas ? 2.0 : 120.0)))
         if dx != 0 {
-            LiSendHighResHScrollEvent(dx)
+            LimelightLifecycle.shared.sendInput {
+                LiSendHighResHScrollEvent(dx)
+            }
         }
     }
 
@@ -1372,7 +1568,9 @@ private final class MoonlightCanvasNSView: NSView {
             mods |= Int8(MODIFIER_EXTENDED)
         }
         let encodedKey = Int16(bitPattern: 0x8000 | (vk & 0xFF))
-        LiSendKeyboardEvent2(encodedKey, Int8(down ? KEY_ACTION_DOWN : KEY_ACTION_UP), mods, 0)
+        LimelightLifecycle.shared.sendInput {
+            LiSendKeyboardEvent2(encodedKey, Int8(down ? KEY_ACTION_DOWN : KEY_ACTION_UP), mods, 0)
+        }
     }
 
     private func currentModifierBits() -> Int8 {
