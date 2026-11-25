@@ -57,74 +57,170 @@ struct RemoteDesktopSectionView: View {
     }
 
     private func nativeSunshineBanner(_ config: SunshineHostConfig) -> some View {
-        HStack(spacing: 14) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(AppTheme.accent.opacity(0.14))
-                Image(systemName: "sun.max.fill")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(AppTheme.accent)
-            }
-            .frame(width: 38, height: 38)
+        let activeRes = store.streamResolution
+        let activeRate = store.streamRefreshRate
+        let autoBitrateMbps = StreamQualityMath.recommendedBitrateKbps(
+            width: activeRes.width,
+            height: activeRes.height,
+            fps: activeRate.fps
+        ) / 1_000
 
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 6) {
-                    Text(snapshot.host.alias)
-                        .font(.system(size: 13.5, weight: .semibold))
-                    readyPill
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 14) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .fill(AppTheme.accent.opacity(0.14))
+                    Image(systemName: "sun.max.fill")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(AppTheme.accent)
                 }
-                Text("\(config.address):\(config.httpPort)")
-                    .font(.system(size: 11.5, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
+                .frame(width: 38, height: 38)
 
-            Spacer(minLength: 8)
-
-            HStack(spacing: 6) {
-                Menu {
-                    Button(l10n.t("1080p @ 60fps 串流", "Stream 1080p @ 60fps")) {
-                        store.launchNativeMoonlightStream(hostAlias: snapshot.host.alias, address: config.address, httpPort: config.httpPort, width: 1920, height: 1080, fps: 60)
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        Text(snapshot.host.alias)
+                            .font(.system(size: 13.5, weight: .semibold))
+                        readyPill
                     }
-                    Button(l10n.t("1080p + 隐私屏模式", "Stream 1080p + Privacy Screen")) {
-                        store.launchNativeMoonlightStream(hostAlias: snapshot.host.alias, address: config.address, httpPort: config.httpPort, width: 1920, height: 1080, fps: 60, enablePrivacyScreen: true)
-                    }
-                    Button(l10n.t("1440p @ 60fps 串流", "Stream 1440p @ 60fps")) {
-                        store.launchNativeMoonlightStream(hostAlias: snapshot.host.alias, address: config.address, httpPort: config.httpPort, width: 2560, height: 1440, fps: 60)
-                    }
-                    Button(l10n.t("4K @ 60fps 串流", "Stream 4K @ 60fps")) {
-                        store.launchNativeMoonlightStream(hostAlias: snapshot.host.alias, address: config.address, httpPort: config.httpPort, width: 3840, height: 2160, fps: 60)
-                    }
-                    Divider()
-                    Button(l10n.t("打开宿主机 Web 管理台", "Open Host Web UI")) {
-                        MoonlightLauncher.openSunshineWebUI(urlString: config.webUIURLString)
-                    }
-                    Button(l10n.t("重新免 PIN 配对…", "Re-pair Host…")) {
-                        store.presentPairSunshine(for: snapshot.host)
-                    }
-                    Button(l10n.t("取消配对", "Unpair Host"), role: .destructive) {
-                        store.removeSunshineHostConfig(config)
-                    }
-                } label: {
-                    Image(systemName: "ellipsis.circle")
-                        .font(.system(size: 13))
+                    Text("\(config.address):\(config.httpPort)")
+                        .font(.system(size: 11.5, design: .monospaced))
                         .foregroundStyle(.secondary)
-                }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
-
-                Button {
-                    store.launchNativeMoonlightStream(hostAlias: snapshot.host.alias, address: config.address, httpPort: config.httpPort)
-                } label: {
-                    Label(l10n.t("连接桌面", "Stream Desktop"), systemImage: "play.display")
                         .lineLimit(1)
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(AppTheme.accent)
-                .controlSize(.small)
-                .help(l10n.t("打开内置硬件加速远程桌面窗口", "Open built-in hardware-accelerated desktop stream"))
+
+                Spacer(minLength: 8)
+
+                HStack(spacing: 6) {
+                    Menu {
+                        ForEach(StreamResolutionPreset.allCases) { preset in
+                            Button(l10n.t(
+                                "\(preset.label) @ \(activeRate.label) 串流",
+                                "Stream \(preset.label) @ \(activeRate.label)"
+                            )) {
+                                store.launchNativeMoonlightStream(
+                                    hostAlias: snapshot.host.alias,
+                                    address: config.address,
+                                    httpPort: config.httpPort,
+                                    width: preset.width,
+                                    height: preset.height,
+                                    fps: activeRate.fps
+                                )
+                            }
+                        }
+                        Button(l10n.t(
+                            "\(activeRes.label) @ \(activeRate.label) + 隐私屏模式",
+                            "Stream \(activeRes.label) @ \(activeRate.label) + Privacy Screen"
+                        )) {
+                            store.launchNativeMoonlightStream(
+                                hostAlias: snapshot.host.alias,
+                                address: config.address,
+                                httpPort: config.httpPort,
+                                width: activeRes.width,
+                                height: activeRes.height,
+                                fps: activeRate.fps,
+                                enablePrivacyScreen: true
+                            )
+                        }
+                        Menu(l10n.t("刷新率串流", "Stream Refresh Rate")) {
+                            ForEach(StreamRefreshRate.allCases) { rate in
+                                Button("\(activeRes.label) @ \(rate.label)") {
+                                    store.launchNativeMoonlightStream(
+                                        hostAlias: snapshot.host.alias,
+                                        address: config.address,
+                                        httpPort: config.httpPort,
+                                        width: activeRes.width,
+                                        height: activeRes.height,
+                                        fps: rate.fps
+                                    )
+                                }
+                            }
+                        }
+                        Divider()
+                        Button(l10n.t("打开宿主机 Web 管理台", "Open Host Web UI")) {
+                            MoonlightLauncher.openSunshineWebUI(urlString: config.webUIURLString)
+                        }
+                        Button(l10n.t("重新免 PIN 配对…", "Re-pair Host…")) {
+                            store.presentPairSunshine(for: snapshot.host)
+                        }
+                        Button(l10n.t("取消配对", "Unpair Host"), role: .destructive) {
+                            store.removeSunshineHostConfig(config)
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                            .font(.system(size: 13))
+                            .foregroundStyle(.secondary)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+
+                    Button {
+                        store.launchNativeMoonlightStream(
+                            hostAlias: snapshot.host.alias,
+                            address: config.address,
+                            httpPort: config.httpPort
+                        )
+                    } label: {
+                        Label(l10n.t("连接桌面", "Stream Desktop"), systemImage: "play.display")
+                            .lineLimit(1)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(AppTheme.accent)
+                    .controlSize(.small)
+                    .help(l10n.t(
+                        "打开内置硬件加速远程桌面窗口 (\(activeRes.label) @ \(activeRate.label))",
+                        "Open built-in hardware-accelerated desktop stream (\(activeRes.label) @ \(activeRate.label))"
+                    ))
+                }
+                .fixedSize(horizontal: true, vertical: false)
             }
-            .fixedSize(horizontal: true, vertical: false)
+
+            Divider()
+
+            HStack(spacing: 12) {
+                HStack(spacing: 6) {
+                    Text(l10n.t("分辨率", "Res"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize()
+                    Picker(l10n.t("分辨率", "Resolution"), selection: $store.streamResolution) {
+                        ForEach(StreamResolutionPreset.allCases) { preset in
+                            Text(preset.label).tag(preset)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .controlSize(.small)
+                    .frame(maxWidth: 170)
+                }
+
+                HStack(spacing: 6) {
+                    Text(l10n.t("帧率", "FPS"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize()
+                    Picker(l10n.t("刷新率", "Refresh Rate"), selection: $store.streamRefreshRate) {
+                        ForEach(StreamRefreshRate.allCases) { rate in
+                            Text(rate.label).tag(rate)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .controlSize(.small)
+                    .frame(maxWidth: 228)
+                }
+
+                Spacer(minLength: 4)
+
+                Text("\(autoBitrateMbps) Mbps")
+                    .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .fixedSize()
+                    .help(l10n.t(
+                        "根据分辨率与刷新率自动匹配推荐串流码率",
+                        "Recommended video bitrate auto-scaled for resolution and refresh rate"
+                    ))
+            }
         }
         .padding(13)
         .cardBackground()

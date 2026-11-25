@@ -455,7 +455,14 @@ class NodeDeckWindow(Gtk.Window):
         self.settings = load_json(SETTINGS_FILE, {})
         self.lang = self.settings.get("language") or detect_default_lang()
         self.metrics_cache = {}
-        self.stream_resolution = "1920x1080x60"
+        saved_res = self.settings.get("stream_resolution", "1920x1080")
+        if saved_res not in ("1920x1080", "2560x1440", "3840x2160"):
+            saved_res = "1920x1080"
+        self.stream_resolution = saved_res
+        saved_fps = str(self.settings.get("stream_fps", "60"))
+        if saved_fps not in ("60", "120", "144", "165"):
+            saved_fps = "60"
+        self.stream_fps = saved_fps
         self.stream_hwaccel = "auto"
         self.active_tab_index = 0
 
@@ -849,10 +856,34 @@ class NodeDeckWindow(Gtk.Window):
 
         rd_row2 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         res_combo = Gtk.ComboBoxText()
-        for opt in ["1920x1080x60", "2560x1440x60", "3840x2160x60", "1920x1080x120"]:
-            res_combo.append(opt, opt)
+        for val, text in [
+            ("1920x1080", "1080p (1920x1080)"),
+            ("2560x1440", "1440p (2560x1440)"),
+            ("3840x2160", "4K (3840x2160)"),
+        ]:
+            res_combo.append(val, text)
         res_combo.set_active_id(self.stream_resolution)
-        res_combo.connect("changed", lambda cb: setattr(self, "stream_resolution", cb.get_active_id() or "1920x1080x60"))
+
+        def on_res_changed(cb):
+            val = cb.get_active_id() or "1920x1080"
+            self.stream_resolution = val
+            self.settings["stream_resolution"] = val
+            save_json(SETTINGS_FILE, self.settings)
+
+        res_combo.connect("changed", on_res_changed)
+
+        fps_combo = Gtk.ComboBoxText()
+        for fps_val in ["60", "120", "144", "165"]:
+            fps_combo.append(fps_val, f"{fps_val}Hz")
+        fps_combo.set_active_id(self.stream_fps)
+
+        def on_fps_changed(cb):
+            val = cb.get_active_id() or "60"
+            self.stream_fps = val
+            self.settings["stream_fps"] = val
+            save_json(SETTINGS_FILE, self.settings)
+
+        fps_combo.connect("changed", on_fps_changed)
 
         hw_combo = Gtk.ComboBoxText()
         for val, text in [
@@ -867,6 +898,7 @@ class NodeDeckWindow(Gtk.Window):
 
         rd_row2.pack_start(Gtk.Label(label=self.t("参数:", "Mode:")), False, False, 0)
         rd_row2.pack_start(res_combo, False, False, 0)
+        rd_row2.pack_start(fps_combo, False, False, 0)
         rd_row2.pack_start(hw_combo, False, False, 0)
         rd_vbox.pack_start(rd_row2, False, False, 0)
 
@@ -1200,7 +1232,13 @@ print(f"OK:{{detected_port}}")
             ctx = ssl._create_unverified_context()
             ctx.load_cert_chain(certfile=str(cert), keyfile=str(key))
             addr, http_port, https_port = saved["address"], saved["httpPort"], saved["httpsPort"]
-            w_str, h_str, fps_str = self.stream_resolution.split("x")
+            w_str, h_str = self.stream_resolution.split("x")
+            fps_str = self.stream_fps
+            mode_str = f"{w_str}x{h_str}x{fps_str}"
+            pixel_ratio = (max(640, int(w_str)) * max(360, int(h_str))) / (1920.0 * 1080.0)
+            fps_ratio = max(30, int(fps_str)) / 60.0
+            raw_bitrate = 20000.0 * (pixel_ratio ** 0.72) * (fps_ratio ** 0.75)
+            bitrate_kbps = max(20000, min(120000, int(round(raw_bitrate / 5000.0)) * 5000))
 
             info_xml = urllib.request.urlopen(f"http://{addr}:{http_port}/serverinfo?uniqueid={uid}", timeout=8).read()
             info = ET.fromstring(info_xml)
@@ -1215,7 +1253,7 @@ print(f"OK:{{detected_port}}")
             rikey = secrets.token_hex(16)
             rikeyid = str(random.randint(1, 2147483647))
             q = urllib.parse.urlencode({
-                "uniqueid": uid, "appid": app_id, "mode": self.stream_resolution,
+                "uniqueid": uid, "appid": app_id, "mode": mode_str,
                 "additionalStates": "1", "sops": "0", "rikey": rikey, "rikeyid": rikeyid,
                 "localAudioPlayMode": "0", "surroundAudioInfo": "196610",
             })
@@ -1227,10 +1265,11 @@ print(f"OK:{{detected_port}}")
                 stream_bin, "--host", addr, "--appver", appver, "--gfever", gfever,
                 "--rtsp", rtsp, "--rikey", rikey, "--rikeyid", rikeyid,
                 "--width", w_str, "--height", h_str, "--fps", fps_str,
+                "--bitrate", str(bitrate_kbps),
                 "--codec-support", codec_support,
                 "--hwaccel", self.stream_hwaccel,
             ])
-            GLib.idle_add(self.status_label.set_text, f"Streaming {addr} ({self.stream_resolution}, hwaccel={self.stream_hwaccel})")
+            GLib.idle_add(self.status_label.set_text, f"Streaming {addr} ({mode_str}, {bitrate_kbps // 1000} Mbps, hwaccel={self.stream_hwaccel})")
         except Exception as exc:
             GLib.idle_add(self.status_label.set_text, f"Stream error: {exc}")
 

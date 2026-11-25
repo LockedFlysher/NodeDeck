@@ -661,6 +661,7 @@ int main(int argc, char **argv) {
     streamConfig.width = width;
     streamConfig.height = height;
     streamConfig.fps = fps;
+    streamConfig.clientRefreshRateX100 = fps * 100;
     streamConfig.bitrate = bitrate;
     streamConfig.packetSize = 1392;
     streamConfig.streamingRemotely = STREAM_CFG_AUTO;
@@ -821,7 +822,7 @@ int main(int argc, char **argv) {
             SDL_RenderPresent(g_renderer);
         } else {
             SDL_UnlockMutex(g_frame_mutex);
-            SDL_Delay(2);
+            SDL_Delay(1);
         }
 
         /* Update live telemetry window title every 1s */

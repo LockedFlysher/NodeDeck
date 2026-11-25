@@ -88,7 +88,21 @@ final class HostMonitor: ObservableObject {
         }
     }
 
+    @Published var streamResolution: StreamResolutionPreset {
+        didSet {
+            UserDefaults.standard.set(streamResolution.rawValue, forKey: Self.streamResolutionKey)
+        }
+    }
+
+    @Published var streamRefreshRate: StreamRefreshRate {
+        didSet {
+            UserDefaults.standard.set(streamRefreshRate.rawValue, forKey: Self.streamRefreshRateKey)
+        }
+    }
+
     private static let refreshIntervalKey = "nodedeck.refreshInterval"
+    private static let streamResolutionKey = "nodedeck.streamResolution"
+    private static let streamRefreshRateKey = "nodedeck.streamRefreshRate"
     static let pinnedAliasesKey = "nodedeck.pinnedAliases"
     let configURL: URL
     private let mountsURL: URL
@@ -108,6 +122,11 @@ final class HostMonitor: ObservableObject {
         self.mountsURL = mountsURL
         let storedInterval = UserDefaults.standard.double(forKey: Self.refreshIntervalKey)
         self.refreshInterval = storedInterval > 0 ? storedInterval : 30
+        let storedRes = UserDefaults.standard.string(forKey: Self.streamResolutionKey)
+            .flatMap(StreamResolutionPreset.init(rawValue:)) ?? .hd1080
+        self.streamResolution = storedRes
+        let storedFPS = UserDefaults.standard.integer(forKey: Self.streamRefreshRateKey)
+        self.streamRefreshRate = StreamRefreshRate(rawValue: storedFPS) ?? .hz60
         let storedPins = UserDefaults.standard.stringArray(forKey: Self.pinnedAliasesKey) ?? []
         self.pinnedAliases = Set(storedPins)
         self.launchAtLogin = LaunchAtLoginManager.isEnabled()

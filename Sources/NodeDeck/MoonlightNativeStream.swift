@@ -564,6 +564,9 @@ final class MoonlightStreamSession: ObservableObject {
     @Published var state: ConnectionState = .idle
     @Published var streamTitle: String = ""
     @Published var stats = StreamPerformanceStats()
+    @Published var targetWidth: Int = 1920
+    @Published var targetHeight: Int = 1080
+    @Published var targetFPS: Int = 60
     @Published var errorMessage: String?
     @Published var isPrivacyScreenEnabled: Bool = false
     @Published var isTogglingPrivacyScreen: Bool = false
@@ -585,6 +588,8 @@ final class MoonlightStreamSession: ObservableObject {
     }
     @Published var clipboardStatusMessage: String?
 
+    var onStreamConfigChanged: ((Int, Int, Int) -> Void)?
+
     private let pipeline = MoonlightMediaPipeline()
     var displayLayer: AVSampleBufferDisplayLayer { pipeline.displayLayer }
 
@@ -594,6 +599,7 @@ final class MoonlightStreamSession: ObservableObject {
     private var currentHTTPPort: Int = 47989
     private var currentAppTitle: String = "Desktop"
     private var isStopping = false
+    private var pendingStopTask: Task<Void, Never>?
     private var clipboardPollTask: Task<Void, Never>?
     private var lastSyncedChangeCount: Int = NSPasteboard.general.changeCount
     private var lastSyncedText: String?
@@ -636,22 +642,33 @@ final class MoonlightStreamSession: ObservableObject {
         width: Int = 1920,
         height: Int = 1080,
         fps: Int = 60,
-        bitrateKbps: Int = 20_000,
+        bitrateKbps: Int? = nil,
         enablePrivacyScreen: Bool = false
     ) {
         stop(quitRemoteApp: false)
+        let previousStop = pendingStopTask
         isStopping = false
         errorMessage = nil
         sshHostAlias = hostAlias
         currentAddress = address
         currentHTTPPort = httpPort
         currentAppTitle = preferredAppTitle
+        targetWidth = width
+        targetHeight = height
+        targetFPS = fps
+        onStreamConfigChanged?(width, height, fps)
+        let resolvedBitrateKbps = bitrateKbps ?? StreamQualityMath.recommendedBitrateKbps(
+            width: width,
+            height: height,
+            fps: fps
+        )
         isPrivacyScreenEnabled = false
         streamTitle = hostAlias ?? address
         stats = StreamPerformanceStats(codec: "Connecting…", resolution: "\(width)×\(height)", fps: 0)
         state = .connecting("Negotiating with Sunshine (\(address):\(httpPort))…")
 
         Task {
+            await previousStop?.value
             do {
                 let launched = try await SunshineClient.shared.launchStream(
                     address: address,
@@ -663,14 +680,14 @@ final class MoonlightStreamSession: ObservableObject {
                 )
                 self.activeLaunchSession = launched
                 self.streamTitle = "\(hostAlias ?? address) · \(launched.appTitle)"
-                self.state = .connecting("Starting native Moonlight stream…")
+                self.state = .connecting("Starting native Moonlight stream (\(width)×\(height) @ \(fps)Hz)…")
 
                 try await startLimelightConnection(
                     session: launched,
                     width: width,
                     height: height,
                     fps: fps,
-                    bitrateKbps: bitrateKbps
+                    bitrateKbps: resolvedBitrateKbps
                 )
 
                 self.updateClipboardAutoSyncTask()
@@ -698,6 +715,16 @@ final class MoonlightStreamSession: ObservableObject {
             fps: fps,
             enablePrivacyScreen: isPrivacyScreenEnabled
         )
+    }
+
+    func switchResolution(_ preset: StreamResolutionPreset) {
+        guard preset.width != targetWidth || preset.height != targetHeight else { return }
+        restartWithResolution(width: preset.width, height: preset.height, fps: targetFPS)
+    }
+
+    func switchRefreshRate(_ rate: StreamRefreshRate) {
+        guard rate.fps != targetFPS else { return }
+        restartWithResolution(width: targetWidth, height: targetHeight, fps: rate.fps)
     }
 
     func togglePrivacyScreen() {
@@ -905,7 +932,7 @@ final class MoonlightStreamSession: ObservableObject {
             }
         }
 
-        Task.detached(priority: .userInitiated) {
+        pendingStopTask = Task.detached(priority: .userInitiated) {
             LiStopConnection()
             if let alias = restoreAlias {
                 let probe = ProcessRunner.run(
@@ -964,6 +991,7 @@ final class MoonlightStreamSession: ObservableObject {
             streamConfig.width = Int32(width)
             streamConfig.height = Int32(height)
             streamConfig.fps = Int32(fps)
+            streamConfig.clientRefreshRateX100 = Int32(fps * 100)
             streamConfig.bitrate = Int32(bitrateKbps)
             streamConfig.packetSize = 1392
             streamConfig.streamingRemotely = STREAM_CFG_AUTO
@@ -1785,7 +1813,7 @@ private struct MoonlightStreamContentView: View {
                 }
 
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 6) {
-                    statCell("FPS", "\(session.stats.fps) fps")
+                    statCell("FPS", "\(session.stats.fps) / \(session.targetFPS) fps")
                     statCell(l10n.t("码率", "Bitrate"), String(format: "%.1f Mbps", session.stats.bitrateMbps))
                     statCell(l10n.t("分辨率", "Resolution"), session.stats.resolution)
                     statCell(l10n.t("编解码", "Codec"), session.stats.codec.replacingOccurrences(of: " (VideoToolbox)", with: ""))
@@ -1875,15 +1903,28 @@ private struct MoonlightStreamContentView: View {
                 .background(Color.black.opacity(0.28), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
 
-            // Resolution Switcher
-            VStack(alignment: .leading, spacing: 5) {
-                Text(l10n.t("切换分辨率", "Resolution"))
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.white.opacity(0.7))
-                HStack(spacing: 6) {
-                    resButton("1080p", w: 1920, h: 1080, fps: 60)
-                    resButton("1440p", w: 2560, h: 1440, fps: 60)
-                    resButton("4K", w: 3840, h: 2160, fps: 60)
+            // Resolution & Refresh Rate Switcher
+            VStack(alignment: .leading, spacing: 6) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(l10n.t("切换分辨率", "Resolution"))
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.7))
+                    HStack(spacing: 6) {
+                        ForEach(StreamResolutionPreset.allCases) { preset in
+                            resButton(preset)
+                        }
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(l10n.t("刷新率 / 帧率", "Refresh Rate"))
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.7))
+                    HStack(spacing: 6) {
+                        ForEach(StreamRefreshRate.allCases) { rate in
+                            fpsButton(rate)
+                        }
+                    }
                 }
             }
 
@@ -1940,20 +1981,56 @@ private struct MoonlightStreamContentView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func resButton(_ title: String, w: Int, h: Int, fps: Int) -> some View {
-        Button(title) {
-            isMenuOpen = false
-            session.restartWithResolution(width: w, height: h, fps: fps)
+    @ViewBuilder
+    private func resButton(_ preset: StreamResolutionPreset) -> some View {
+        let isSelected = session.targetWidth == preset.width && session.targetHeight == preset.height
+        if isSelected {
+            Button(preset.label) {
+                isMenuOpen = false
+                session.switchResolution(preset)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(AppTheme.accent)
+            .controlSize(.small)
+            .frame(maxWidth: .infinity)
+        } else {
+            Button(preset.label) {
+                isMenuOpen = false
+                session.switchResolution(preset)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .frame(maxWidth: .infinity)
         }
-        .buttonStyle(.bordered)
-        .controlSize(.small)
-        .frame(maxWidth: .infinity)
+    }
+
+    @ViewBuilder
+    private func fpsButton(_ rate: StreamRefreshRate) -> some View {
+        let isSelected = session.targetFPS == rate.fps
+        if isSelected {
+            Button(rate.label) {
+                isMenuOpen = false
+                session.switchRefreshRate(rate)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(AppTheme.accent)
+            .controlSize(.small)
+            .frame(maxWidth: .infinity)
+        } else {
+            Button(rate.label) {
+                isMenuOpen = false
+                session.switchRefreshRate(rate)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .frame(maxWidth: .infinity)
+        }
     }
 
     private var performanceHUDPill: some View {
         HStack(spacing: 10) {
             Circle().fill(statusColor).frame(width: 7, height: 7)
-            Text("\(session.stats.fps) fps")
+            Text("\(session.stats.fps)/\(session.targetFPS) fps")
             Text("·")
             Text(String(format: "%.1f Mbps", session.stats.bitrateMbps))
             Text("·")
@@ -2001,11 +2078,13 @@ final class MoonlightStreamWindowController: NSObject, NSWindowDelegate {
         width: Int = 1920,
         height: Int = 1080,
         fps: Int = 60,
-        enablePrivacyScreen: Bool = false
+        enablePrivacyScreen: Bool = false,
+        onStreamConfigChanged: ((Int, Int, Int) -> Void)? = nil
     ) {
         closeCurrentWindow()
 
         let newSession = MoonlightStreamSession()
+        newSession.onStreamConfigChanged = onStreamConfigChanged
         self.session = newSession
 
         let win = NSWindow(

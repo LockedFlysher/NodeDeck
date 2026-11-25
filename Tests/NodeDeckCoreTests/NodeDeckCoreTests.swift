@@ -713,4 +713,30 @@ final class NodeDeckCoreTests: XCTestCase {
         XCTAssertEqual(socks.sshForwardSpec, "127.0.0.1:1080")
         XCTAssertNil(socks.openableURLString)
     }
+
+    func testStreamRefreshRatesAndRecommendedBitrates() {
+        XCTAssertEqual(StreamRefreshRate.allCases.map(\.fps), [60, 120, 144, 165])
+        XCTAssertEqual(StreamRefreshRate.hz120.label, "120Hz")
+        XCTAssertEqual(StreamRefreshRate.hz144.clientRefreshRateX100, 14_400)
+        XCTAssertEqual(StreamRefreshRate.hz165.clientRefreshRateX100, 16_500)
+
+        XCTAssertEqual(StreamResolutionPreset(width: 2560, height: 1440), .qhd1440)
+        XCTAssertEqual(StreamResolutionPreset.qhd1440.modeString(fps: 144), "2560x1440x144")
+        XCTAssertNil(StreamResolutionPreset(width: 1280, height: 720))
+
+        let b1080_60 = StreamQualityMath.recommendedBitrateKbps(width: 1920, height: 1080, fps: 60)
+        let b1080_120 = StreamQualityMath.recommendedBitrateKbps(width: 1920, height: 1080, fps: 120)
+        let b1080_144 = StreamQualityMath.recommendedBitrateKbps(width: 1920, height: 1080, fps: 144)
+        let b1080_165 = StreamQualityMath.recommendedBitrateKbps(width: 1920, height: 1080, fps: 165)
+        let b1440_144 = StreamQualityMath.recommendedBitrateKbps(width: 2560, height: 1440, fps: 144)
+        let b4k_165 = StreamQualityMath.recommendedBitrateKbps(width: 3840, height: 2160, fps: 165)
+
+        XCTAssertEqual(b1080_60, 20_000)
+        XCTAssertLessThan(b1080_60, b1080_120)
+        XCTAssertLessThan(b1080_120, b1080_144)
+        XCTAssertLessThan(b1080_144, b1080_165)
+        XCTAssertLessThan(b1080_144, b1440_144)
+        XCTAssertLessThan(b1440_144, b4k_165)
+        XCTAssertLessThanOrEqual(b4k_165, 120_000)
+    }
 }

@@ -269,7 +269,10 @@ struct HostDetailView: View {
             }
             .buttonStyle(.bordered)
             .fixedSize(horizontal: true, vertical: false)
-            .help(l10n.t("启动内置硬件加速远程桌面 (⇧⌘D)", "Stream native hardware-accelerated desktop (⇧⌘D)"))
+            .help(l10n.t(
+                "启动内置硬件加速远程桌面 (\(store.streamResolution.label) @ \(store.streamRefreshRate.label) · ⇧⌘D)",
+                "Stream native hardware-accelerated desktop (\(store.streamResolution.label) @ \(store.streamRefreshRate.label) · ⇧⌘D)"
+            ))
         } else {
             Button {
                 TerminalLauncher.copyCommand(for: snapshot.host)

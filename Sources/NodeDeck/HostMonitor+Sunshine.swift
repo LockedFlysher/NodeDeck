@@ -167,20 +167,44 @@ extension HostMonitor {
         address: String,
         httpPort: Int = 47989,
         appTitle: String = "Desktop",
-        width: Int = 1920,
-        height: Int = 1080,
-        fps: Int = 60,
+        width: Int? = nil,
+        height: Int? = nil,
+        fps: Int? = nil,
         enablePrivacyScreen: Bool = false
     ) {
+        let resolvedWidth = width ?? streamResolution.width
+        let resolvedHeight = height ?? streamResolution.height
+        let resolvedFPS = fps ?? streamRefreshRate.fps
+
+        if let preset = StreamResolutionPreset(width: resolvedWidth, height: resolvedHeight),
+           preset != streamResolution {
+            streamResolution = preset
+        }
+        if let rate = StreamRefreshRate(rawValue: resolvedFPS),
+           rate != streamRefreshRate {
+            streamRefreshRate = rate
+        }
+
         MoonlightStreamWindowController.shared.openStream(
             hostAlias: hostAlias,
             address: address,
             httpPort: httpPort,
             appTitle: appTitle,
-            width: width,
-            height: height,
-            fps: fps,
-            enablePrivacyScreen: enablePrivacyScreen
+            width: resolvedWidth,
+            height: resolvedHeight,
+            fps: resolvedFPS,
+            enablePrivacyScreen: enablePrivacyScreen,
+            onStreamConfigChanged: { [weak self] newWidth, newHeight, newFPS in
+                guard let self else { return }
+                if let preset = StreamResolutionPreset(width: newWidth, height: newHeight),
+                   preset != self.streamResolution {
+                    self.streamResolution = preset
+                }
+                if let rate = StreamRefreshRate(rawValue: newFPS),
+                   rate != self.streamRefreshRate {
+                    self.streamRefreshRate = rate
+                }
+            }
         )
     }
 }
