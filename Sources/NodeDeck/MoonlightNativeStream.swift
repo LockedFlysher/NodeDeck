@@ -68,6 +68,27 @@ private final class LimelightLifecycle: @unchecked Sendable {
         body()
     }
 
+    /// Releases all standard modifier keys (Shift/Ctrl/Alt/Win) and primary mouse buttons on the
+    /// remote host so a previous crash, reconnect, or macOS hotkey never leaves Super/Ctrl stuck down.
+    func releaseAllRemoteModifiers() {
+        let modifierVKs: [(vk: UInt16, extended: Bool)] = [
+            (0xA0, false), (0xA1, true), // L/R Shift
+            (0xA2, false), (0xA3, true), // L/R Ctrl
+            (0xA4, false), (0xA5, true), // L/R Alt
+            (0x5B, true),  (0x5C, true)  // L/R Win (Super/Cmd)
+        ]
+        sendInput {
+            for item in modifierVKs {
+                let encodedKey = Int16(bitPattern: 0x8000 | (item.vk & 0xFF))
+                let mods: Int8 = item.extended ? Int8(MODIFIER_EXTENDED) : 0
+                LiSendKeyboardEvent2(encodedKey, Int8(KEY_ACTION_UP), mods, 0)
+            }
+            LiSendMouseButtonEvent(Int8(BUTTON_ACTION_RELEASE), Int32(BUTTON_LEFT))
+            LiSendMouseButtonEvent(Int8(BUTTON_ACTION_RELEASE), Int32(BUTTON_RIGHT))
+            LiSendMouseButtonEvent(Int8(BUTTON_ACTION_RELEASE), Int32(BUTTON_MIDDLE))
+        }
+    }
+
     /// Waits on the global serial queue for any active C connection to stop cleanly.
     func stopConnection() async {
         interruptAndDisableInput()
@@ -109,6 +130,7 @@ private final class LimelightLifecycle: @unchecked Sendable {
                 if rc == 0 {
                     if self.isCurrent(generation: generation) {
                         self.setInputAllowed(true)
+                        self.releaseAllRemoteModifiers()
                         continuation.resume(returning: 0)
                     } else {
                         self.setInputAllowed(false)
@@ -1316,7 +1338,12 @@ private final class MoonlightCanvasNSView: NSView {
     let displayLayer: AVSampleBufferDisplayLayer
     private var trackingAreaRef: NSTrackingArea?
     var videoAspectRatio: CGFloat = 16.0 / 9.0
-    var swapCmdToCtrl: Bool = false
+    var swapCmdToCtrl: Bool = false {
+        didSet {
+            guard oldValue != swapCmdToCtrl else { return }
+            releaseAllPressedKeys()
+        }
+    }
     var onRelativeMouseChange: ((Bool) -> Void)?
     private var isCursorHidden = false
     var relativeMouseEnabled: Bool = false {
@@ -1326,8 +1353,9 @@ private final class MoonlightCanvasNSView: NSView {
         }
     }
     private var pressedKeys: Set<UInt16> = [] // stores Win32 VK codes currently held down
+    private var keysPressedWithCommand: Set<UInt16> = [] // macOS swallows keyUp while Cmd is held
     private var activeModifierVKs: Set<UInt16> = []
-    private var resignObserver: NSObjectProtocol?
+    private var lifecycleObservers: [NSObjectProtocol] = []
 
     init(displayLayer: AVSampleBufferDisplayLayer) {
         self.displayLayer = displayLayer
@@ -1338,7 +1366,7 @@ private final class MoonlightCanvasNSView: NSView {
 
     deinit {
         applyRelativeMouseState(false)
-        if let obs = resignObserver {
+        for obs in lifecycleObservers {
             NotificationCenter.default.removeObserver(obs)
         }
     }
@@ -1369,16 +1397,17 @@ private final class MoonlightCanvasNSView: NSView {
     }
 
     override var acceptsFirstResponder: Bool { true }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        if let obs = resignObserver {
+        for obs in lifecycleObservers {
             NotificationCenter.default.removeObserver(obs)
-            resignObserver = nil
         }
+        lifecycleObservers.removeAll()
         if let win = window {
             win.acceptsMouseMovedEvents = true
-            resignObserver = NotificationCenter.default.addObserver(
+            let resignKeyObs = NotificationCenter.default.addObserver(
                 forName: NSWindow.didResignKeyNotification,
                 object: win,
                 queue: .main
@@ -1389,6 +1418,28 @@ private final class MoonlightCanvasNSView: NSView {
                     self?.onRelativeMouseChange?(false)
                 }
             }
+            let resignAppObs = NotificationCenter.default.addObserver(
+                forName: NSApplication.didResignActiveNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.releaseAllPressedKeys()
+                if self?.relativeMouseEnabled == true {
+                    self?.relativeMouseEnabled = false
+                    self?.onRelativeMouseChange?(false)
+                }
+            }
+            let becomeKeyObs = NotificationCenter.default.addObserver(
+                forName: NSWindow.didBecomeKeyNotification,
+                object: win,
+                queue: .main
+            ) { [weak self] _ in
+                guard let self else { return }
+                self.releaseAllPressedKeys()
+                self.syncModifiers(from: NSEvent.modifierFlags)
+                self.window?.makeFirstResponder(self)
+            }
+            lifecycleObservers = [resignKeyObs, resignAppObs, becomeKeyObs]
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.window?.makeFirstResponder(self)
@@ -1412,6 +1463,7 @@ private final class MoonlightCanvasNSView: NSView {
             sendVK(vk, down: false, extended: Self.isExtendedVK(vk), modifiers: 0)
         }
         pressedKeys.removeAll()
+        keysPressedWithCommand.removeAll()
         for vk in activeModifierVKs {
             sendVK(vk, down: false, extended: Self.isExtendedVK(vk), modifiers: 0)
         }
@@ -1451,6 +1503,7 @@ private final class MoonlightCanvasNSView: NSView {
 
     private func sendMouseMotion(from event: NSEvent) {
         guard LimelightLifecycle.shared.isInputAllowed else { return }
+        syncModifiers(from: event.modifierFlags)
         if relativeMouseEnabled {
             let dx = Int16(clamping: Int(event.deltaX.rounded()))
             let dy = Int16(clamping: Int(event.deltaY.rounded()))
@@ -1482,6 +1535,8 @@ private final class MoonlightCanvasNSView: NSView {
     private func sendAbsolutePositionIfNeeded(from event: NSEvent) {
         if !relativeMouseEnabled {
             sendMouseMotion(from: event)
+        } else {
+            syncModifiers(from: event.modifierFlags)
         }
     }
 
@@ -1548,6 +1603,7 @@ private final class MoonlightCanvasNSView: NSView {
 
     override func scrollWheel(with event: NSEvent) {
         guard LimelightLifecycle.shared.isInputAllowed else { return }
+        syncModifiers(from: event.modifierFlags)
         let dy = Int16(clamping: Int(event.scrollingDeltaY * (event.hasPreciseScrollingDeltas ? 2.0 : 120.0)))
         if dy != 0 {
             LimelightLifecycle.shared.sendInput {
@@ -1590,6 +1646,7 @@ private final class MoonlightCanvasNSView: NSView {
         // Keep Cmd+H (Hide) and Cmd+M (Minimize) native if desired; forward everything else to remote Linux
         if event.modifierFlags.contains(.command) && !swapCmdToCtrl {
             if event.keyCode == 4 || event.keyCode == 46 { // H or M
+                releaseAllPressedKeys()
                 return super.performKeyEquivalent(with: event)
             }
         }
@@ -1618,6 +1675,7 @@ private final class MoonlightCanvasNSView: NSView {
             }
             if event.keyCode == 6 { // Z
                 releaseAllPressedKeys()
+                LimelightLifecycle.shared.releaseAllRemoteModifiers()
                 if relativeMouseEnabled {
                     relativeMouseEnabled = false
                     onRelativeMouseChange?(false)
@@ -1629,6 +1687,9 @@ private final class MoonlightCanvasNSView: NSView {
         syncModifiers(from: event.modifierFlags)
         guard let mapped = Self.macKeyCodeToVK(event.keyCode) else { return }
         if pressedKeys.insert(mapped.vk).inserted {
+            if event.modifierFlags.contains(.command) {
+                keysPressedWithCommand.insert(mapped.vk)
+            }
             sendVK(mapped.vk, down: true, extended: mapped.extended, modifiers: currentModifierBits())
         }
     }
@@ -1637,6 +1698,7 @@ private final class MoonlightCanvasNSView: NSView {
         syncModifiers(from: event.modifierFlags)
         guard let mapped = Self.macKeyCodeToVK(event.keyCode) else { return }
         pressedKeys.remove(mapped.vk)
+        keysPressedWithCommand.remove(mapped.vk)
         sendVK(mapped.vk, down: false, extended: mapped.extended, modifiers: currentModifierBits())
     }
 
@@ -1653,14 +1715,31 @@ private final class MoonlightCanvasNSView: NSView {
 
     private func syncModifiers(from flags: NSEvent.ModifierFlags) {
         let raw = flags.rawValue
-        let lShift = (raw & UInt(NX_DEVICELSHIFTKEYMASK)) != 0
-        let rShift = (raw & UInt(NX_DEVICERSHIFTKEYMASK)) != 0
-        let lCtrl = (raw & UInt(NX_DEVICELCTLKEYMASK)) != 0
-        let rCtrl = (raw & UInt(NX_DEVICERCTLKEYMASK)) != 0
-        let lAlt = (raw & UInt(NX_DEVICELALTKEYMASK)) != 0
-        let rAlt = (raw & UInt(NX_DEVICERALTKEYMASK)) != 0
-        let lCmd = (raw & UInt(NX_DEVICELCMDKEYMASK)) != 0
-        let rCmd = (raw & UInt(NX_DEVICERCMDKEYMASK)) != 0
+        let shiftDown = flags.contains(.shift)
+        let ctrlDown = flags.contains(.control)
+        let altDown = flags.contains(.option)
+        let cmdDown = flags.contains(.command)
+
+        // Release any keys whose keyUp was swallowed by AppKit while Command was held
+        if !cmdDown && !keysPressedWithCommand.isEmpty {
+            let mods = currentModifierBits()
+            for vk in keysPressedWithCommand {
+                pressedKeys.remove(vk)
+                sendVK(vk, down: false, extended: Self.isExtendedVK(vk), modifiers: mods)
+            }
+            keysPressedWithCommand.removeAll()
+        }
+
+        // Gate device-dependent left/right masks by device-independent flags so stale lower bits
+        // can never leave a modifier stuck, while synthetic events without lower bits still map cleanly.
+        let lShift = shiftDown && ((raw & UInt(NX_DEVICELSHIFTKEYMASK)) != 0 || (raw & UInt(NX_DEVICERSHIFTKEYMASK)) == 0)
+        let rShift = shiftDown && (raw & UInt(NX_DEVICERSHIFTKEYMASK)) != 0
+        let lCtrl  = ctrlDown  && ((raw & UInt(NX_DEVICELCTLKEYMASK)) != 0   || (raw & UInt(NX_DEVICERCTLKEYMASK)) == 0)
+        let rCtrl  = ctrlDown  && (raw & UInt(NX_DEVICERCTLKEYMASK)) != 0
+        let lAlt   = altDown   && ((raw & UInt(NX_DEVICELALTKEYMASK)) != 0   || (raw & UInt(NX_DEVICERALTKEYMASK)) == 0)
+        let rAlt   = altDown   && (raw & UInt(NX_DEVICERALTKEYMASK)) != 0
+        let lCmd   = cmdDown   && ((raw & UInt(NX_DEVICELCMDKEYMASK)) != 0   || (raw & UInt(NX_DEVICERCMDKEYMASK)) == 0)
+        let rCmd   = cmdDown   && (raw & UInt(NX_DEVICERCMDKEYMASK)) != 0
 
         let desired: [(vk: UInt16, down: Bool, extended: Bool)] = [
             (0xA0, lShift, false),
