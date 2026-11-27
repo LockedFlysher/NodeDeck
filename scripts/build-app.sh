@@ -72,28 +72,27 @@ done
 
 iconutil -c icns "$ICONSET" -o "$APP_PATH/Contents/Resources/AppIcon.icns"
 
-# Embed headless nodedeck-host as a direct helper executable inside NodeDeck.app/Contents/Helpers
-# so macOS TCC attributes Screen Recording & Accessibility directly to NodeDeck.app (one app in System Settings).
+# Embed headless nodedeck-host directly inside NodeDeck.app/Contents/MacOS so:
+# 1) NSBundle.mainBundle.bundleURL resolves to NodeDeck.app (required by UNUserNotificationCenter in Sunshine)
+# 2) macOS TCC attributes Screen Recording & Accessibility directly to NodeDeck.app (single app in System Settings)
 if [[ -d "$HOST_APP" && -x "$HOST_APP/Contents/MacOS/nodedeck-host" ]]; then
-    mkdir -p "$APP_PATH/Contents/Helpers"
-    cp "$HOST_APP/Contents/MacOS/nodedeck-host" "$APP_PATH/Contents/Helpers/nodedeck-host"
-    chmod 0755 "$APP_PATH/Contents/Helpers/nodedeck-host"
+    cp "$HOST_APP/Contents/MacOS/nodedeck-host" "$APP_PATH/Contents/MacOS/nodedeck-host"
+    chmod 0755 "$APP_PATH/Contents/MacOS/nodedeck-host"
     if [[ -d "$HOST_APP/Contents/MacOS/host-lib" ]]; then
-        rm -rf "$APP_PATH/Contents/Helpers/host-lib"
-        ditto "$HOST_APP/Contents/MacOS/host-lib" "$APP_PATH/Contents/Helpers/host-lib"
+        rm -rf "$APP_PATH/Contents/MacOS/host-lib"
+        ditto "$HOST_APP/Contents/MacOS/host-lib" "$APP_PATH/Contents/MacOS/host-lib"
     fi
     if [[ -d "$HOST_APP/Contents/Resources/assets" ]]; then
-        rm -rf "$APP_PATH/Contents/Resources/host-assets"
-        ditto "$HOST_APP/Contents/Resources/assets" "$APP_PATH/Contents/Resources/host-assets"
+        rm -rf "$APP_PATH/Contents/Resources/assets"
+        ditto "$HOST_APP/Contents/Resources/assets" "$APP_PATH/Contents/Resources/assets"
     fi
 elif [[ -x "$HOST_BIN" ]]; then
-    mkdir -p "$APP_PATH/Contents/Helpers"
-    cp "$HOST_BIN" "$APP_PATH/Contents/Helpers/nodedeck-host"
-    chmod 0755 "$APP_PATH/Contents/Helpers/nodedeck-host"
+    cp "$HOST_BIN" "$APP_PATH/Contents/MacOS/nodedeck-host"
+    chmod 0755 "$APP_PATH/Contents/MacOS/nodedeck-host"
     HOST_LIB_DIR="$(dirname "$HOST_BIN")/host-lib"
     if [[ -d "$HOST_LIB_DIR" ]] && [[ -n "$(ls -A "$HOST_LIB_DIR" 2>/dev/null)" ]]; then
-        rm -rf "$APP_PATH/Contents/Helpers/host-lib"
-        ditto "$HOST_LIB_DIR" "$APP_PATH/Contents/Helpers/host-lib"
+        rm -rf "$APP_PATH/Contents/MacOS/host-lib"
+        ditto "$HOST_LIB_DIR" "$APP_PATH/Contents/MacOS/host-lib"
     fi
 fi
 

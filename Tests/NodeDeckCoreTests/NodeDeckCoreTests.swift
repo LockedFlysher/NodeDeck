@@ -207,7 +207,7 @@ final class NodeDeckCoreTests: XCTestCase {
         let openPort = Int(UInt16(bigEndian: addr.sin_port))
         XCTAssertTrue(NetworkProbe.isTCPPortOpen(host: "127.0.0.1", port: openPort, timeoutMs: 250))
         XCTAssertFalse(NetworkProbe.isTCPPortOpen(host: "127.0.0.1", port: 0, timeoutMs: 50))
-        XCTAssertTrue(SunshineHostManager.bundledBinaryPath.hasSuffix("Contents/Helpers/nodedeck-host"))
+        XCTAssertTrue(SunshineHostManager.bundledBinaryPath.hasSuffix("Contents/MacOS/nodedeck-host"))
     }
 
     func testProcessRunnerNoFDLeakAndTimeoutReaping() {

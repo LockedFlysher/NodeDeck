@@ -49,13 +49,13 @@ public final class SunshineHostManager: @unchecked Sendable {
 
     public static var bundledBinaryPath: String {
         Bundle.main.bundleURL
-            .appendingPathComponent("Contents/Helpers/nodedeck-host")
+            .appendingPathComponent("Contents/MacOS/nodedeck-host")
             .path
     }
 
     public static var legacyBundledAppBinaryPath: String {
         Bundle.main.bundleURL
-            .appendingPathComponent("Contents/Helpers/NodeDeckHost.app/Contents/MacOS/nodedeck-host")
+            .appendingPathComponent("Contents/Helpers/nodedeck-host")
             .path
     }
 
