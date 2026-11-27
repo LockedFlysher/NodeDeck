@@ -5,6 +5,7 @@ import com.nodedeck.android.core.SshConfigParser
 import com.nodedeck.android.core.StreamQualityMath
 import com.nodedeck.android.core.StreamRefreshRate
 import com.nodedeck.android.core.StreamResolutionPreset
+import com.nodedeck.android.stream.ViewportTransformState
 import com.nodedeck.android.ui.Vt100Emulator
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -110,5 +111,39 @@ class NodeDeckCoreTest {
         assertEquals("hello nodedeck", line0)
         assertEquals(0, snap.cursorRow)
         assertEquals(14, snap.cursorCol)
+    }
+
+    @Test
+    fun testViewportTransformZoomPanAndInverseMapping() {
+        val vp = ViewportTransformState()
+        // Landscape phone 2400x1080 displaying 16:9 video (1920x1080) with black pillarbox margins
+        vp.updateBounds(containerW = 2400f, containerH = 1080f, baseSurfaceW = 1920f, baseSurfaceH = 1080f)
+
+        // At 1.0x, screen center maps to exact video center (960, 540)
+        val (cx1, cy1) = vp.screenToVideo(1200f, 540f, 1920, 1080)
+        assertEquals(960, cx1)
+        assertEquals(540, cy1)
+
+        // Zoom to 2.0x centered on top-left quadrant of video (x=720 -> local 480, y=270 -> local 270)
+        vp.applyZoomAndPan(newScale = 2.0f, focalX = 720f, focalY = 270f, panDeltaX = 0f, panDeltaY = 0f)
+        assertEquals(2.0f, vp.zoomScale, 0.001f)
+        // Focal point on screen should still map to the same video coordinate (480, 270)
+        val (fx, fy) = vp.screenToVideo(720f, 270f, 1920, 1080)
+        assertEquals(480, fx)
+        assertEquals(270, fy)
+
+        // Pan clamping: cannot pan past zoomed surface edges
+        vp.applyPanOnly(panDeltaX = 10_000f, panDeltaY = -10_000f)
+        val maxPanX = (1920f * 2.0f - 2400f) / 2f // 720
+        val maxPanY = (1080f * 2.0f - 1080f) / 2f // 540
+        assertEquals(maxPanX, vp.panX, 0.01f)
+        assertEquals(-maxPanY, vp.panY, 0.01f)
+
+        // Snap near unity resets cleanly
+        vp.setPresetScale(1.03f)
+        vp.snapIfNearUnity()
+        assertEquals(1.0f, vp.zoomScale, 0.001f)
+        assertEquals(0f, vp.panX, 0.001f)
+        assertEquals(0f, vp.panY, 0.001f)
     }
 }

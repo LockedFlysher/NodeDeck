@@ -130,11 +130,20 @@ fun HostListScreen(
             TopAppBar(
                 title = {
                     Column {
-                        Text("NodeDeck", fontWeight = FontWeight.Bold)
                         Text(
-                            text = "${onlineCount}/${hosts.size} ${AppLocalization.t("在线 · 零云端本地直连", "online · Zero-Cloud", lang)}",
+                            text = "NodeDeck",
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = "${onlineCount}/${hosts.size} ${AppLocalization.t("在线", "online", lang)}",
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 },
@@ -147,7 +156,7 @@ fun HostListScreen(
                         modifier = Modifier.clickable(onClick = onOpenAccount)
                     ) {
                         Row(
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 4.dp),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
@@ -171,11 +180,13 @@ fun HostListScreen(
                                 },
                                 style = MaterialTheme.typography.labelSmall,
                                 color = if (meshOnline) NodeDeckColors.Online else MaterialTheme.colorScheme.onSurface,
-                                maxLines = 1
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
                     }
-                    Spacer(Modifier.width(6.dp))
+                    Spacer(Modifier.width(4.dp))
                     val badge = when (lang) {
                         AppLanguage.SYSTEM -> "Auto"
                         AppLanguage.ZH_HANS -> "中"
@@ -187,31 +198,48 @@ fun HostListScreen(
                         modifier = Modifier.clickable { viewModel.cycleLanguage() }
                     ) {
                         Row(
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            horizontalArrangement = Arrangement.spacedBy(3.dp)
                         ) {
                             Icon(
                                 Icons.Default.Language,
                                 contentDescription = "Language",
                                 tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(16.dp)
+                                modifier = Modifier.size(14.dp)
                             )
                             Text(
                                 text = badge,
                                 style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurface
+                                color = MaterialTheme.colorScheme.onSurface,
+                                maxLines = 1,
+                                softWrap = false
                             )
                         }
                     }
-                    IconButton(onClick = onOpenGuide) {
-                        Icon(Icons.Default.Security, contentDescription = "Architecture & Security")
+                    IconButton(
+                        onClick = onOpenGuide,
+                        modifier = Modifier.size(38.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.Security,
+                            contentDescription = "Architecture & Security",
+                            modifier = Modifier.size(20.dp)
+                        )
                     }
-                    IconButton(onClick = { viewModel.refreshAllHosts() }, enabled = !isRefreshingAll) {
+                    IconButton(
+                        onClick = { viewModel.refreshAllHosts() },
+                        enabled = !isRefreshingAll,
+                        modifier = Modifier.size(38.dp)
+                    ) {
                         if (isRefreshingAll) {
-                            CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                            CircularProgressIndicator(modifier = Modifier.size(17.dp), strokeWidth = 2.dp)
                         } else {
-                            Icon(Icons.Default.Refresh, contentDescription = "Refresh All")
+                            Icon(
+                                Icons.Default.Refresh,
+                                contentDescription = "Refresh All",
+                                modifier = Modifier.size(20.dp)
+                            )
                         }
                     }
                 }

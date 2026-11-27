@@ -2,6 +2,7 @@ package com.nodedeck.android.stream
 
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -16,6 +17,11 @@ import android.widget.FrameLayout
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -48,19 +54,21 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.AspectRatio
+import androidx.compose.material.icons.filled.CenterFocusStrong
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.DesktopWindows
 import androidx.compose.material.icons.filled.Keyboard
+import androidx.compose.material.icons.filled.Mouse
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.ScreenRotation
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -74,19 +82,27 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.Stable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -105,9 +121,118 @@ import com.nodedeck.android.core.StreamRefreshRate
 import com.nodedeck.android.core.StreamResolutionPreset
 import com.nodedeck.android.ui.theme.NodeDeckColors
 import com.nodedeck.android.ui.theme.NodeDeckTheme
+import kotlinx.coroutines.delay
 import kotlin.math.abs
 import kotlin.math.hypot
+import kotlin.math.max
 import kotlin.math.roundToInt
+
+enum class StreamOrientationMode(val activityOrientation: Int) {
+    LANDSCAPE(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE),
+    PORTRAIT(ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT),
+    AUTO(ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR)
+}
+
+@Stable
+internal class ViewportTransformState {
+    var zoomScale by mutableFloatStateOf(1f)
+    var panX by mutableFloatStateOf(0f)
+    var panY by mutableFloatStateOf(0f)
+    var isPinching by mutableStateOf(false)
+
+    // Updated from BoxWithConstraints in pixels
+    var containerW: Float = 1f
+    var containerH: Float = 1f
+    var baseSurfaceW: Float = 1f
+    var baseSurfaceH: Float = 1f
+
+    fun updateBounds(containerW: Float, containerH: Float, baseSurfaceW: Float, baseSurfaceH: Float) {
+        this.containerW = containerW.coerceAtLeast(1f)
+        this.containerH = containerH.coerceAtLeast(1f)
+        this.baseSurfaceW = baseSurfaceW.coerceAtLeast(1f)
+        this.baseSurfaceH = baseSurfaceH.coerceAtLeast(1f)
+        clampPan()
+    }
+
+    fun reset() {
+        zoomScale = 1f
+        panX = 0f
+        panY = 0f
+        isPinching = false
+    }
+
+    fun setPresetScale(targetScale: Float) {
+        val clamped = targetScale.coerceIn(MIN_ZOOM, MAX_ZOOM)
+        if (clamped <= 1.01f) {
+            reset()
+            return
+        }
+        val ratio = clamped / zoomScale.coerceAtLeast(1f)
+        zoomScale = clamped
+        panX *= ratio
+        panY *= ratio
+        clampPan()
+    }
+
+    fun applyZoomAndPan(
+        newScale: Float,
+        focalX: Float,
+        focalY: Float,
+        panDeltaX: Float,
+        panDeltaY: Float
+    ) {
+        val clamped = newScale.coerceIn(MIN_ZOOM, MAX_ZOOM)
+        if (clamped <= 1.005f) {
+            zoomScale = 1f
+            panX = 0f
+            panY = 0f
+            return
+        }
+        val oldScale = zoomScale.coerceAtLeast(1f)
+        val ratio = clamped / oldScale
+        val relX = focalX - containerW / 2f
+        val relY = focalY - containerH / 2f
+        val rawX = (panX - relX) * ratio + relX + panDeltaX
+        val rawY = (panY - relY) * ratio + relY + panDeltaY
+        zoomScale = clamped
+        panX = rawX
+        panY = rawY
+        clampPan()
+    }
+
+    fun applyPanOnly(panDeltaX: Float, panDeltaY: Float) {
+        if (zoomScale <= 1.01f) return
+        panX += panDeltaX
+        panY += panDeltaY
+        clampPan()
+    }
+
+    fun snapIfNearUnity() {
+        if (zoomScale < 1.05f) {
+            reset()
+        }
+    }
+
+    fun screenToVideo(screenX: Float, screenY: Float, videoW: Int, videoH: Int): Pair<Int, Int> {
+        val localX = (screenX - containerW / 2f - panX) / zoomScale.coerceAtLeast(1f) + baseSurfaceW / 2f
+        val localY = (screenY - containerH / 2f - panY) / zoomScale.coerceAtLeast(1f) + baseSurfaceH / 2f
+        val nx = (localX / baseSurfaceW.coerceAtLeast(1f)).coerceIn(0f, 1f)
+        val ny = (localY / baseSurfaceH.coerceAtLeast(1f)).coerceIn(0f, 1f)
+        return (nx * videoW).roundToInt() to (ny * videoH).roundToInt()
+    }
+
+    private fun clampPan() {
+        val maxPanX = max(0f, (baseSurfaceW * zoomScale - containerW) / 2f)
+        val maxPanY = max(0f, (baseSurfaceH * zoomScale - containerH) / 2f)
+        panX = panX.coerceIn(-maxPanX, maxPanX)
+        panY = panY.coerceIn(-maxPanY, maxPanY)
+    }
+
+    companion object {
+        const val MIN_ZOOM = 1.0f
+        const val MAX_ZOOM = 4.0f
+    }
+}
 
 class StreamActivity : ComponentActivity() {
     private lateinit var session: StreamSession
@@ -115,6 +240,7 @@ class StreamActivity : ComponentActivity() {
     private var allHosts: List<SSHHost> = emptyList()
     private var launchAddress: String = ""
     private var launchHttpPort: Int = 47989
+    private val orientationModeState = mutableStateOf(StreamOrientationMode.LANDSCAPE)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -152,6 +278,12 @@ class StreamActivity : ComponentActivity() {
             NodeDeckTheme(darkTheme = true) {
                 StreamScreen(
                     session = session,
+                    orientationMode = orientationModeState.value,
+                    onSelectOrientation = { mode ->
+                        orientationModeState.value = mode
+                        requestedOrientation = mode.activityOrientation
+                        hideSystemBars()
+                    },
                     onReconnect = {
                         session.start(
                             host = launchHost,
@@ -232,171 +364,355 @@ class StreamActivity : ComponentActivity() {
     }
 }
 
+private enum class TwoFingerGestureMode {
+    NONE,
+    UNDECIDED,
+    PINCH_ZOOM,
+    PAN_VIEWPORT,
+    SCROLL
+}
+
 private class StreamTouchInputController(
     private val view: View,
+    private val viewport: ViewportTransformState,
     private val isTouchpadMode: () -> Boolean,
-    private val getVideoDims: () -> Pair<Int, Int>
+    private val getVideoDims: () -> Pair<Int, Int>,
+    private val onCanvasTouchStart: () -> Unit
 ) : View.OnTouchListener {
 
     private val handler = Handler(Looper.getMainLooper())
     private val density = view.resources.displayMetrics.density
+
+    // Gesture thresholds (tuned to separate pinch-zoom cleanly from scroll & right-click)
     private val tapSlopPx = 12f * density
+    private val directCommitMovePx = 6f * density
+    private val pinchMinInitialSpanPx = 24f * density
+    private val pinchThresholdPx = 28f * density
+    private val pinchThresholdRatio = 0.14f
+    private val scrollActivatePx = 16f * density
+    private val directDownDelayMs = 60L
 
     private var downTimeMs = 0L
+    private var twoFingerDownTimeMs = 0L
     private var maxPointers = 0
+    private var suppressSingleUntilUp = false
+
+    // Single-finger state
     private var startX = 0f
     private var startY = 0f
     private var lastX = 0f
     private var lastY = 0f
-    private var lastTwoX = 0f
-    private var lastTwoY = 0f
     private var movedBeyondSlop = false
     private var longPressDragging = false
-    private var scrollAccumY = 0f
-    private var scrollAccumX = 0f
+    private var directLeftDownSent = false
+    private var directPendingDown = false
 
-    private val longPressRunnable = Runnable {
-        if (!movedBeyondSlop && maxPointers == 1 && isTouchpadMode()) {
+    // Two-finger state (shared across Touchpad & Direct Touch)
+    private var twoFingerMode = TwoFingerGestureMode.NONE
+    private var initialSpan = 0f
+    private var lastSpan = 0f
+    private var initialMidX = 0f
+    private var initialMidY = 0f
+    private var lastMidX = 0f
+    private var lastMidY = 0f
+    private var scrollAccumX = 0f
+    private var scrollAccumY = 0f
+
+    private val touchpadLongPressRunnable = Runnable {
+        if (!movedBeyondSlop && maxPointers == 1 && !suppressSingleUntilUp && isTouchpadMode()) {
             longPressDragging = true
             view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
             MoonlightNative.sendMouseButton(pressed = true, button = MoonlightNative.BUTTON_LEFT)
         }
     }
 
-    override fun onTouch(v: View, event: MotionEvent): Boolean {
-        val touchpad = isTouchpadMode()
-        return if (touchpad) handleTouchpad(event) else handleDirectTouch(event)
+    private val directDownCommitRunnable = Runnable {
+        if (directPendingDown && maxPointers == 1 && !suppressSingleUntilUp && !isTouchpadMode()) {
+            commitDirectLeftDown(lastX, lastY)
+        }
     }
 
-    private fun handleTouchpad(event: MotionEvent): Boolean {
+    private fun commitDirectLeftDown(screenX: Float, screenY: Float) {
+        directPendingDown = false
+        if (!directLeftDownSent) {
+            val (videoW, videoH) = getVideoDims()
+            val (rx, ry) = viewport.screenToVideo(screenX, screenY, videoW, videoH)
+            MoonlightNative.sendMousePosition(rx, ry, videoW, videoH)
+            MoonlightNative.sendMouseButton(pressed = true, button = MoonlightNative.BUTTON_LEFT)
+            directLeftDownSent = true
+        }
+    }
+
+    private fun cancelSingleFingerPending() {
+        handler.removeCallbacks(touchpadLongPressRunnable)
+        handler.removeCallbacks(directDownCommitRunnable)
+        directPendingDown = false
+        if (directLeftDownSent) {
+            MoonlightNative.sendMouseButton(pressed = false, button = MoonlightNative.BUTTON_LEFT)
+            directLeftDownSent = false
+        }
+        if (longPressDragging) {
+            MoonlightNative.sendMouseButton(pressed = false, button = MoonlightNative.BUTTON_LEFT)
+            longPressDragging = false
+        }
+    }
+
+    private fun beginTwoFingerGesture(event: MotionEvent) {
+        cancelSingleFingerPending()
+        suppressSingleUntilUp = true
+        twoFingerDownTimeMs = event.eventTime
+        twoFingerMode = TwoFingerGestureMode.UNDECIDED
+        val x0 = event.getX(0)
+        val y0 = event.getY(0)
+        val x1 = event.getX(1)
+        val y1 = event.getY(1)
+        initialSpan = hypot((x1 - x0).toDouble(), (y1 - y0).toDouble()).toFloat()
+        lastSpan = initialSpan
+        initialMidX = (x0 + x1) / 2f
+        initialMidY = (y0 + y1) / 2f
+        lastMidX = initialMidX
+        lastMidY = initialMidY
+        scrollAccumX = 0f
+        scrollAccumY = 0f
+    }
+
+    private fun handleTwoFingerMove(event: MotionEvent) {
+        val x0 = event.getX(0)
+        val y0 = event.getY(0)
+        val x1 = event.getX(1)
+        val y1 = event.getY(1)
+        val span = hypot((x1 - x0).toDouble(), (y1 - y0).toDouble()).toFloat()
+        val midX = (x0 + x1) / 2f
+        val midY = (y0 + y1) / 2f
+        val panDx = midX - lastMidX
+        val panDy = midY - lastMidY
+
+        val spanDeltaFromInit = abs(span - initialSpan)
+        val spanRatioFromInit = if (initialSpan >= pinchMinInitialSpanPx) {
+            abs(span / initialSpan - 1f)
+        } else {
+            0f
+        }
+        val midTravelFromInit = hypot((midX - initialMidX).toDouble(), (midY - initialMidY).toDouble()).toFloat()
+
+        when (twoFingerMode) {
+            TwoFingerGestureMode.UNDECIDED -> {
+                val crossedPinchThreshold =
+                    initialSpan >= pinchMinInitialSpanPx &&
+                        spanDeltaFromInit >= pinchThresholdPx &&
+                        spanRatioFromInit >= pinchThresholdRatio
+                if (crossedPinchThreshold) {
+                    twoFingerMode = TwoFingerGestureMode.PINCH_ZOOM
+                    viewport.isPinching = true
+                    view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                    // Re-anchor at threshold crossing so zoom starts smoothly without a sudden jump
+                    lastSpan = span
+                    lastMidX = midX
+                    lastMidY = midY
+                    return
+                }
+                if (midTravelFromInit >= scrollActivatePx && spanDeltaFromInit < pinchThresholdPx * 0.85f) {
+                    twoFingerMode = if (viewport.zoomScale > 1.04f) {
+                        TwoFingerGestureMode.PAN_VIEWPORT
+                    } else {
+                        TwoFingerGestureMode.SCROLL
+                    }
+                    lastSpan = span
+                    lastMidX = midX
+                    lastMidY = midY
+                    return
+                }
+            }
+
+            TwoFingerGestureMode.PAN_VIEWPORT -> {
+                viewport.applyPanOnly(panDx, panDy)
+                // Allow seamless upgrade to pinch-zoom if user spreads/pinches past threshold while panning
+                val upgradeToPinch =
+                    initialSpan >= pinchMinInitialSpanPx &&
+                        spanDeltaFromInit >= pinchThresholdPx * 1.15f &&
+                        spanRatioFromInit >= pinchThresholdRatio
+                if (upgradeToPinch) {
+                    twoFingerMode = TwoFingerGestureMode.PINCH_ZOOM
+                    viewport.isPinching = true
+                    view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                }
+            }
+
+            TwoFingerGestureMode.PINCH_ZOOM -> {
+                val scaleFactor = if (lastSpan > 1f) (span / lastSpan).coerceIn(0.8f, 1.25f) else 1f
+                viewport.applyZoomAndPan(
+                    newScale = viewport.zoomScale * scaleFactor,
+                    focalX = midX,
+                    focalY = midY,
+                    panDeltaX = panDx,
+                    panDeltaY = panDy
+                )
+            }
+
+            TwoFingerGestureMode.SCROLL -> {
+                scrollAccumY += panDy
+                scrollAccumX += panDx
+                val stepPx = 10f * density
+                if (abs(scrollAccumY) >= stepPx) {
+                    val units = ((scrollAccumY / stepPx) * 45f).roundToInt()
+                    if (units != 0) MoonlightNative.sendScroll(units)
+                    scrollAccumY = 0f
+                }
+                if (abs(scrollAccumX) >= stepPx * 1.4f) {
+                    val units = ((-scrollAccumX / stepPx) * 40f).roundToInt()
+                    if (units != 0) MoonlightNative.sendHScroll(units)
+                    scrollAccumX = 0f
+                }
+            }
+
+            TwoFingerGestureMode.NONE -> Unit
+        }
+
+        lastSpan = span
+        lastMidX = midX
+        lastMidY = midY
+    }
+
+    override fun onTouch(v: View, event: MotionEvent): Boolean {
+        val touchpad = isTouchpadMode()
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                onCanvasTouchStart()
                 downTimeMs = event.eventTime
                 maxPointers = 1
+                suppressSingleUntilUp = false
+                twoFingerMode = TwoFingerGestureMode.NONE
                 startX = event.x
                 startY = event.y
                 lastX = event.x
                 lastY = event.y
                 movedBeyondSlop = false
                 longPressDragging = false
+                directLeftDownSent = false
+                directPendingDown = false
                 scrollAccumX = 0f
                 scrollAccumY = 0f
-                handler.removeCallbacks(longPressRunnable)
-                handler.postDelayed(longPressRunnable, 380L)
-            }
-            MotionEvent.ACTION_POINTER_DOWN -> {
-                handler.removeCallbacks(longPressRunnable)
-                maxPointers = maxOf(maxPointers, event.pointerCount)
-                if (event.pointerCount >= 2) {
-                    lastTwoX = (event.getX(0) + event.getX(1)) / 2f
-                    lastTwoY = (event.getY(0) + event.getY(1)) / 2f
+                handler.removeCallbacks(touchpadLongPressRunnable)
+                handler.removeCallbacks(directDownCommitRunnable)
+                if (touchpad) {
+                    handler.postDelayed(touchpadLongPressRunnable, 380L)
+                } else {
+                    directPendingDown = true
+                    handler.postDelayed(directDownCommitRunnable, directDownDelayMs)
                 }
             }
+
+            MotionEvent.ACTION_POINTER_DOWN -> {
+                maxPointers = maxOf(maxPointers, event.pointerCount)
+                if (event.pointerCount == 2) {
+                    beginTwoFingerGesture(event)
+                } else {
+                    cancelSingleFingerPending()
+                    suppressSingleUntilUp = true
+                }
+            }
+
             MotionEvent.ACTION_MOVE -> {
                 if (event.pointerCount >= 2) {
-                    handler.removeCallbacks(longPressRunnable)
-                    val cx = (event.getX(0) + event.getX(1)) / 2f
-                    val cy = (event.getY(0) + event.getY(1)) / 2f
-                    val dx = cx - lastTwoX
-                    val dy = cy - lastTwoY
-                    if (hypot(dx.toDouble(), dy.toDouble()) > tapSlopPx * 0.5) {
-                        movedBeyondSlop = true
+                    if (twoFingerMode == TwoFingerGestureMode.NONE) {
+                        beginTwoFingerGesture(event)
+                    } else {
+                        handleTwoFingerMove(event)
                     }
-                    lastTwoX = cx
-                    lastTwoY = cy
-                    scrollAccumY += dy
-                    scrollAccumX += dx
-                    val stepPx = 10f * density
-                    if (abs(scrollAccumY) >= stepPx) {
-                        val units = ((scrollAccumY / stepPx) * 45f).roundToInt()
-                        if (units != 0) MoonlightNative.sendScroll(units)
-                        scrollAccumY = 0f
-                    }
-                    if (abs(scrollAccumX) >= stepPx * 1.4f) {
-                        val units = ((-scrollAccumX / stepPx) * 40f).roundToInt()
-                        if (units != 0) MoonlightNative.sendHScroll(units)
-                        scrollAccumX = 0f
-                    }
-                } else if (event.pointerCount == 1 && maxPointers == 1) {
-                    val dx = event.x - lastX
-                    val dy = event.y - lastY
-                    if (!movedBeyondSlop && hypot((event.x - startX).toDouble(), (event.y - startY).toDouble()) > tapSlopPx) {
-                        movedBeyondSlop = true
-                        handler.removeCallbacks(longPressRunnable)
-                    }
-                    lastX = event.x
-                    lastY = event.y
-                    if (movedBeyondSlop || longPressDragging) {
-                        val gain = 1.4f
-                        val mx = (dx * gain).roundToInt()
-                        val my = (dy * gain).roundToInt()
-                        if (mx != 0 || my != 0) {
-                            MoonlightNative.sendMouseMove(mx, my)
+                } else if (event.pointerCount == 1 && !suppressSingleUntilUp && maxPointers == 1) {
+                    if (touchpad) {
+                        val dx = event.x - lastX
+                        val dy = event.y - lastY
+                        if (!movedBeyondSlop &&
+                            hypot((event.x - startX).toDouble(), (event.y - startY).toDouble()) > tapSlopPx
+                        ) {
+                            movedBeyondSlop = true
+                            handler.removeCallbacks(touchpadLongPressRunnable)
+                        }
+                        lastX = event.x
+                        lastY = event.y
+                        if (movedBeyondSlop || longPressDragging) {
+                            val gain = 1.4f
+                            val mx = (dx * gain).roundToInt()
+                            val my = (dy * gain).roundToInt()
+                            if (mx != 0 || my != 0) {
+                                MoonlightNative.sendMouseMove(mx, my)
+                            }
+                        }
+                    } else {
+                        lastX = event.x
+                        lastY = event.y
+                        if (directPendingDown &&
+                            hypot((event.x - startX).toDouble(), (event.y - startY).toDouble()) >= directCommitMovePx
+                        ) {
+                            handler.removeCallbacks(directDownCommitRunnable)
+                            commitDirectLeftDown(event.x, event.y)
+                        } else if (directLeftDownSent) {
+                            val (videoW, videoH) = getVideoDims()
+                            val (rx, ry) = viewport.screenToVideo(event.x, event.y, videoW, videoH)
+                            MoonlightNative.sendMousePosition(rx, ry, videoW, videoH)
                         }
                     }
                 }
             }
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                handler.removeCallbacks(longPressRunnable)
-                val duration = event.eventTime - downTimeMs
-                if (longPressDragging) {
-                    MoonlightNative.sendMouseButton(pressed = false, button = MoonlightNative.BUTTON_LEFT)
-                    longPressDragging = false
-                } else if (event.actionMasked == MotionEvent.ACTION_UP && !movedBeyondSlop) {
-                    if (maxPointers == 1 && duration < 260L) {
-                        MoonlightNative.sendMouseButton(pressed = true, button = MoonlightNative.BUTTON_LEFT)
-                        MoonlightNative.sendMouseButton(pressed = false, button = MoonlightNative.BUTTON_LEFT)
-                    } else if (maxPointers >= 2 && duration < 320L) {
-                        MoonlightNative.sendMouseButton(pressed = true, button = MoonlightNative.BUTTON_RIGHT)
-                        MoonlightNative.sendMouseButton(pressed = false, button = MoonlightNative.BUTTON_RIGHT)
-                    }
+
+            MotionEvent.ACTION_POINTER_UP -> {
+                if (twoFingerMode == TwoFingerGestureMode.PINCH_ZOOM) {
+                    viewport.isPinching = false
+                    viewport.snapIfNearUnity()
                 }
-                maxPointers = 0
+                // Keep suppressing single-finger motion until all fingers lift
+                suppressSingleUntilUp = true
             }
-        }
-        return true
-    }
 
-    private fun handleDirectTouch(event: MotionEvent): Boolean {
-        val (videoW, videoH) = getVideoDims()
-        val viewW = view.width.coerceAtLeast(1).toFloat()
-        val viewH = view.height.coerceAtLeast(1).toFloat()
-
-        // touchView is sized identically to the aspect-ratio-fitted SurfaceView, so 1:1 normalized mapping is exact
-        fun mapCoords(x: Float, y: Float): Pair<Int, Int> {
-            val nx = (x / viewW).coerceIn(0f, 1f)
-            val ny = (y / viewH).coerceIn(0f, 1f)
-            return (nx * videoW).roundToInt() to (ny * videoH).roundToInt()
-        }
-
-        when (event.actionMasked) {
-            MotionEvent.ACTION_DOWN -> {
-                maxPointers = 1
-                downTimeMs = event.eventTime
-                val (rx, ry) = mapCoords(event.x, event.y)
-                MoonlightNative.sendMousePosition(rx, ry, videoW, videoH)
-                MoonlightNative.sendMouseButton(pressed = true, button = MoonlightNative.BUTTON_LEFT)
-            }
-            MotionEvent.ACTION_POINTER_DOWN -> {
-                maxPointers = maxOf(maxPointers, event.pointerCount)
-                if (maxPointers == 2) {
-                    MoonlightNative.sendMouseButton(pressed = false, button = MoonlightNative.BUTTON_LEFT)
-                    val (rx, ry) = mapCoords(event.getX(0), event.getY(0))
-                    MoonlightNative.sendMousePosition(rx, ry, videoW, videoH)
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                handler.removeCallbacks(touchpadLongPressRunnable)
+                handler.removeCallbacks(directDownCommitRunnable)
+                val isUp = event.actionMasked == MotionEvent.ACTION_UP
+                if (twoFingerMode == TwoFingerGestureMode.PINCH_ZOOM) {
+                    viewport.isPinching = false
+                    viewport.snapIfNearUnity()
+                } else if (isUp &&
+                    maxPointers == 2 &&
+                    twoFingerMode == TwoFingerGestureMode.UNDECIDED &&
+                    (event.eventTime - twoFingerDownTimeMs) < 320L
+                ) {
+                    // Clean two-finger tap -> Right-click in both Touchpad & Direct Touch
+                    if (!touchpad) {
+                        val (videoW, videoH) = getVideoDims()
+                        val (rx, ry) = viewport.screenToVideo(initialMidX, initialMidY, videoW, videoH)
+                        MoonlightNative.sendMousePosition(rx, ry, videoW, videoH)
+                    }
                     MoonlightNative.sendMouseButton(pressed = true, button = MoonlightNative.BUTTON_RIGHT)
                     MoonlightNative.sendMouseButton(pressed = false, button = MoonlightNative.BUTTON_RIGHT)
+                } else if (!suppressSingleUntilUp && maxPointers == 1) {
+                    if (touchpad) {
+                        val duration = event.eventTime - downTimeMs
+                        if (longPressDragging) {
+                            MoonlightNative.sendMouseButton(pressed = false, button = MoonlightNative.BUTTON_LEFT)
+                            longPressDragging = false
+                        } else if (isUp && !movedBeyondSlop && duration < 260L) {
+                            MoonlightNative.sendMouseButton(pressed = true, button = MoonlightNative.BUTTON_LEFT)
+                            MoonlightNative.sendMouseButton(pressed = false, button = MoonlightNative.BUTTON_LEFT)
+                        }
+                    } else {
+                        if (directPendingDown && isUp) {
+                            // Fast tap under 60ms -> instant left click
+                            commitDirectLeftDown(event.x, event.y)
+                            MoonlightNative.sendMouseButton(pressed = false, button = MoonlightNative.BUTTON_LEFT)
+                            directLeftDownSent = false
+                        } else if (directLeftDownSent) {
+                            MoonlightNative.sendMouseButton(pressed = false, button = MoonlightNative.BUTTON_LEFT)
+                            directLeftDownSent = false
+                        }
+                        directPendingDown = false
+                    }
+                } else {
+                    cancelSingleFingerPending()
                 }
-            }
-            MotionEvent.ACTION_MOVE -> {
-                if (event.pointerCount == 1 && maxPointers == 1) {
-                    val (rx, ry) = mapCoords(event.x, event.y)
-                    MoonlightNative.sendMousePosition(rx, ry, videoW, videoH)
-                }
-            }
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                if (maxPointers == 1) {
-                    MoonlightNative.sendMouseButton(pressed = false, button = MoonlightNative.BUTTON_LEFT)
-                }
+                twoFingerMode = TwoFingerGestureMode.NONE
+                viewport.isPinching = false
+                suppressSingleUntilUp = false
                 maxPointers = 0
             }
         }
@@ -407,6 +723,8 @@ private class StreamTouchInputController(
 @Composable
 private fun StreamScreen(
     session: StreamSession,
+    orientationMode: StreamOrientationMode,
+    onSelectOrientation: (StreamOrientationMode) -> Unit,
     onReconnect: () -> Unit,
     onDisconnect: (quitApp: Boolean) -> Unit
 ) {
@@ -427,9 +745,42 @@ private fun StreamScreen(
     val displayStatus by session.displayStatus.collectAsState()
 
     var showControlMenu by remember { mutableStateOf(false) }
+    var showQuickBar by remember { mutableStateOf(false) }
     var showKeyboardDock by remember { mutableStateOf(false) }
+    var showVirtualMouseButtons by remember { mutableStateOf(false) }
+    var leftDragLocked by remember { mutableStateOf(false) }
     var fillCropMode by remember { mutableStateOf(false) }
-    var zoomScale by remember { mutableFloatStateOf(1f) }
+    var orbInteractionTick by remember { mutableIntStateOf(0) }
+    var orbDimmed by remember { mutableStateOf(false) }
+    val viewport = remember { ViewportTransformState() }
+
+    // Auto-close overlays when disconnected so dialogs never collide
+    LaunchedEffect(state) {
+        if (state is StreamConnectionState.Disconnected) {
+            showControlMenu = false
+            showQuickBar = false
+            if (leftDragLocked) {
+                MoonlightNative.sendMouseButton(pressed = false, button = MoonlightNative.BUTTON_LEFT)
+                leftDragLocked = false
+            }
+        }
+    }
+
+    // Auto-dim floating orb when idle so it stays unobtrusive like UU Remote
+    LaunchedEffect(orbInteractionTick, showQuickBar, showControlMenu) {
+        if (showQuickBar || showControlMenu) {
+            orbDimmed = false
+        } else {
+            orbDimmed = false
+            delay(3200L)
+            orbDimmed = true
+        }
+    }
+    val orbAlpha by animateFloatAsState(
+        targetValue = if (orbDimmed) 0.42f else 0.96f,
+        animationSpec = tween(260),
+        label = "orbAlpha"
+    )
 
     // Resolve actual decoded aspect ratio (falls back to target stream dimensions)
     val (videoW, videoH) = remember(stats.resolution, targetWidth, targetHeight) {
@@ -440,21 +791,18 @@ private fun StreamScreen(
     }
 
     BackHandler {
-        if (showControlMenu) {
-            showControlMenu = false
-        } else if (showKeyboardDock) {
-            showKeyboardDock = false
-        } else {
-            showControlMenu = true
+        when {
+            showControlMenu -> showControlMenu = false
+            showKeyboardDock -> showKeyboardDock = false
+            showQuickBar -> showQuickBar = false
+            else -> showControlMenu = true
         }
     }
 
-    val config = LocalConfiguration.current
     val density = LocalDensity.current
-    val screenW = with(density) { config.screenWidthDp.dp.toPx() }
-    val screenH = with(density) { config.screenHeightDp.dp.toPx() }
+    var orbInitialized by remember { mutableStateOf(false) }
     var orbOffsetX by remember { mutableFloatStateOf(24f) }
-    var orbOffsetY by remember { mutableFloatStateOf(120f) }
+    var orbOffsetY by remember { mutableFloatStateOf(160f) }
 
     BoxWithConstraints(
         modifier = Modifier
@@ -463,17 +811,31 @@ private fun StreamScreen(
     ) {
         val viewW = maxWidth
         val viewH = maxHeight
+        val screenW = with(density) { maxWidth.toPx() }
+        val screenH = with(density) { maxHeight.toPx() }
+        val orbPx = with(density) { 46.dp.toPx() }
+
+        // Default orb on right-middle edge (thumb friendly, never overlaps top-left HUD)
+        LaunchedEffect(screenW, screenH) {
+            if (!orbInitialized && screenW > 100f && screenH > 100f) {
+                orbOffsetX = (screenW - orbPx - 16f).coerceAtLeast(16f)
+                orbOffsetY = (screenH * 0.34f).coerceIn(24f, (screenH - orbPx - 24f).coerceAtLeast(24f))
+                orbInitialized = true
+            } else if (orbInitialized && screenW > 100f && screenH > 100f) {
+                orbOffsetX = orbOffsetX.coerceIn(12f, (screenW - orbPx - 12f).coerceAtLeast(12f))
+                orbOffsetY = orbOffsetY.coerceIn(24f, (screenH - orbPx - 24f).coerceAtLeast(24f))
+            }
+        }
+
         val videoAspect = videoW.toFloat() / videoH.coerceAtLeast(1).toFloat()
         val viewAspect = viewW.value / viewH.value.coerceAtLeast(1f)
         val (surfaceW, surfaceH) = if (!fillCropMode) {
-            // Original aspect ratio (Fit with black letterbox/pillarbox, zero horizontal stretch)
             if (viewAspect > videoAspect) {
                 (viewH * videoAspect) to viewH
             } else {
                 viewW to (viewW / videoAspect)
             }
         } else {
-            // Uniform scale to cover full screen without aspect distortion
             if (viewAspect > videoAspect) {
                 viewW to (viewW / videoAspect)
             } else {
@@ -481,18 +843,28 @@ private fun StreamScreen(
             }
         }
 
-        // Aspect-ratio-exact SurfaceView + aligned multi-touch overlay
+        val surfaceWPx = with(density) { surfaceW.toPx() }
+        val surfaceHPx = with(density) { surfaceH.toPx() }
+        viewport.updateBounds(
+            containerW = screenW,
+            containerH = screenH,
+            baseSurfaceW = surfaceWPx,
+            baseSurfaceH = surfaceHPx
+        )
+
+        // 1. Aspect-ratio-exact SurfaceView with smooth zoom + focal pan transform
         AndroidView(
             modifier = Modifier
                 .align(Alignment.Center)
                 .size(surfaceW, surfaceH)
                 .graphicsLayer(
-                    scaleX = zoomScale,
-                    scaleY = zoomScale
+                    scaleX = viewport.zoomScale,
+                    scaleY = viewport.zoomScale,
+                    translationX = viewport.panX,
+                    translationY = viewport.panY
                 ),
             factory = { ctx ->
-                val container = FrameLayout(ctx)
-                val surfaceView = SurfaceView(ctx).apply {
+                SurfaceView(ctx).apply {
                     holder.addCallback(object : SurfaceHolder.Callback {
                         override fun surfaceCreated(holder: SurfaceHolder) {
                             session.attachSurface(holder.surface)
@@ -505,43 +877,46 @@ private fun StreamScreen(
                         }
                     })
                 }
-                val touchView = View(ctx)
-                touchView.setOnTouchListener(
-                    StreamTouchInputController(
-                        view = touchView,
-                        isTouchpadMode = { session.touchpadMode.value },
-                        getVideoDims = {
-                            val m = Regex("""(\d+)\s*[x×]\s*(\d+)""").find(session.stats.value.resolution)
-                            val w = m?.groupValues?.getOrNull(1)?.toIntOrNull()?.takeIf { it > 0 } ?: session.targetWidth.value
-                            val h = m?.groupValues?.getOrNull(2)?.toIntOrNull()?.takeIf { it > 0 } ?: session.targetHeight.value
-                            w to h
-                        }
-                    )
-                )
-                container.addView(
-                    surfaceView,
-                    FrameLayout.LayoutParams(
-                        FrameLayout.LayoutParams.MATCH_PARENT,
-                        FrameLayout.LayoutParams.MATCH_PARENT
-                    )
-                )
-                container.addView(
-                    touchView,
-                    FrameLayout.LayoutParams(
-                        FrameLayout.LayoutParams.MATCH_PARENT,
-                        FrameLayout.LayoutParams.MATCH_PARENT
-                    )
-                )
-                container
             }
         )
 
-        // Pinned Telemetry HUD
+        // 2. Full-screen untransformed multi-touch receiver (zero feedback jitter during pinch/pan & covers black bars)
+        AndroidView(
+            modifier = Modifier.fillMaxSize(),
+            factory = { ctx ->
+                View(ctx).apply {
+                    setOnTouchListener(
+                        StreamTouchInputController(
+                            view = this,
+                            viewport = viewport,
+                            isTouchpadMode = { session.touchpadMode.value },
+                            getVideoDims = {
+                                val m = Regex("""(\d+)\s*[x×]\s*(\d+)""").find(session.stats.value.resolution)
+                                val w = m?.groupValues?.getOrNull(1)?.toIntOrNull()?.takeIf { it > 0 } ?: session.targetWidth.value
+                                val h = m?.groupValues?.getOrNull(2)?.toIntOrNull()?.takeIf { it > 0 } ?: session.targetHeight.value
+                                w to h
+                            },
+                            onCanvasTouchStart = {
+                                if (showQuickBar) showQuickBar = false
+                            }
+                        )
+                    )
+                }
+            }
+        )
+
+        // 3. Pinned Telemetry HUD (color-coded latency, tap to minimize)
         if (showHud && state is StreamConnectionState.Streaming) {
+            val rttColor = when {
+                stats.networkRttMs <= 35 -> NodeDeckColors.Online
+                stats.networkRttMs <= 80 -> NodeDeckColors.Warning
+                else -> NodeDeckColors.Offline
+            }
             Surface(
                 modifier = Modifier
                     .align(Alignment.TopStart)
-                    .padding(14.dp),
+                    .padding(14.dp)
+                    .clickable { session.setShowHud(false) },
                 shape = RoundedCornerShape(10.dp),
                 color = Color(0xBB0D1218)
             ) {
@@ -567,15 +942,95 @@ private fun StreamScreen(
                         style = MaterialTheme.typography.labelSmall
                     )
                     Text(
-                        text = "RTT ${stats.networkRttMs}ms (±${stats.networkJitterMs})",
-                        color = Color(0xFF9ED5DC),
+                        text = "RTT ${stats.networkRttMs}ms",
+                        color = rttColor,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
+        }
+
+        // 4. Floating Zoom Indicator & 1-Tap Reset Pill (shown while zoomed or pinching)
+        AnimatedVisibility(
+            visible = state is StreamConnectionState.Streaming && (viewport.zoomScale > 1.02f || viewport.isPinching),
+            enter = fadeIn(tween(150)),
+            exit = fadeOut(tween(200)),
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .padding(top = 12.dp)
+        ) {
+            Surface(
+                shape = RoundedCornerShape(20.dp),
+                color = Color(0xD9101820),
+                modifier = Modifier
+                    .border(1.dp, NodeDeckColors.AccentLight.copy(alpha = 0.55f), RoundedCornerShape(20.dp))
+                    .clickable { viewport.reset() }
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.CenterFocusStrong,
+                        contentDescription = null,
+                        tint = NodeDeckColors.AccentLight,
+                        modifier = Modifier.size(15.dp)
+                    )
+                    Text(
+                        text = String.format("%.2f×", viewport.zoomScale),
+                        color = Color.White,
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = AppLocalization.t("双指拖动 · 点此复位", "2-Finger Pan · Tap Reset", lang),
+                        color = Color(0xFFAEC4D6),
                         style = MaterialTheme.typography.labelSmall
                     )
                 }
             }
         }
 
-        // Connecting / Disconnected Overlay
+        // 5. Optional Floating Virtual Mouse Buttons (Left / Drag-Lock / Right)
+        AnimatedVisibility(
+            visible = showVirtualMouseButtons && state is StreamConnectionState.Streaming && !showKeyboardDock,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(end = 18.dp, bottom = 18.dp)
+        ) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                VirtualMousePill(
+                    label = if (leftDragLocked) AppLocalization.t("松开左键", "Drop L", lang) else AppLocalization.t("左键拖选", "Drag L", lang),
+                    active = leftDragLocked,
+                    onClick = {
+                        leftDragLocked = !leftDragLocked
+                        MoonlightNative.sendMouseButton(pressed = leftDragLocked, button = MoonlightNative.BUTTON_LEFT)
+                    }
+                )
+                VirtualMousePill(
+                    label = AppLocalization.t("左键", "L-Click", lang),
+                    active = false,
+                    onClick = {
+                        MoonlightNative.sendMouseButton(pressed = true, button = MoonlightNative.BUTTON_LEFT)
+                        MoonlightNative.sendMouseButton(pressed = false, button = MoonlightNative.BUTTON_LEFT)
+                    }
+                )
+                VirtualMousePill(
+                    label = AppLocalization.t("右键", "R-Click", lang),
+                    active = false,
+                    onClick = {
+                        MoonlightNative.sendMouseButton(pressed = true, button = MoonlightNative.BUTTON_RIGHT)
+                        MoonlightNative.sendMouseButton(pressed = false, button = MoonlightNative.BUTTON_RIGHT)
+                    }
+                )
+            }
+        }
+
+        // 6. Connecting / Disconnected Overlay
         when (val s = state) {
             is StreamConnectionState.Connecting -> {
                 Box(
@@ -651,40 +1106,143 @@ private fun StreamScreen(
             else -> Unit
         }
 
-        // Draggable Floating Orb
-        Box(
-            modifier = Modifier
-                .offset { IntOffset(orbOffsetX.roundToInt(), orbOffsetY.roundToInt()) }
-                .size(46.dp)
-                .clip(CircleShape)
-                .background(Color(0xCC162028))
-                .border(1.5.dp, NodeDeckColors.AccentLight.copy(alpha = 0.85f), CircleShape)
-                .pointerInput(screenW, screenH) {
-                    detectDragGestures(
-                        onDragEnd = {
-                            val orbPx = 46f * density.density
-                            val snapLeft = orbOffsetX < (screenW - orbPx) / 2f
-                            orbOffsetX = if (snapLeft) 16f else (screenW - orbPx - 16f).coerceAtLeast(16f)
-                            orbOffsetY = orbOffsetY.coerceIn(24f, (screenH - orbPx - 24f).coerceAtLeast(24f))
+        // 7. Auto-dimming Floating Orb + 1-Tap Quick Action Pill Bar (UU-Remote style)
+        if (state is StreamConnectionState.Streaming || state is StreamConnectionState.Connecting) {
+            val orbOnRight = orbOffsetX > (screenW - orbPx) / 2f
+
+            // Compact Quick Action Pill Bar cleanly aligned beside the orb with zero overlap
+            if (showQuickBar && !showControlMenu) {
+                val barY = orbOffsetY.coerceIn(16f, (screenH - orbPx - 16f).coerceAtLeast(16f))
+                val edgePadPx = (orbPx + with(density) { 24.dp.toPx() }).roundToInt()
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .offset { IntOffset(0, barY.roundToInt()) }
+                        .padding(
+                            start = if (orbOnRight) 12.dp else with(density) { edgePadPx.toDp() },
+                            end = if (orbOnRight) with(density) { edgePadPx.toDp() } else 12.dp
+                        ),
+                    contentAlignment = if (orbOnRight) Alignment.CenterEnd else Alignment.CenterStart
+                ) {
+                    Surface(
+                        modifier = Modifier.height(46.dp),
+                        shape = RoundedCornerShape(23.dp),
+                        color = Color(0xEB121A22),
+                        tonalElevation = 8.dp
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .border(1.dp, NodeDeckColors.AccentLight.copy(alpha = 0.45f), RoundedCornerShape(23.dp))
+                                .horizontalScroll(rememberScrollState())
+                                .padding(horizontal = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            QuickOrbAction(
+                                icon = Icons.Default.Keyboard,
+                                label = AppLocalization.t("键盘", "KB", lang),
+                                active = showKeyboardDock
+                            ) {
+                                showKeyboardDock = !showKeyboardDock
+                                showQuickBar = false
+                            }
+                            QuickOrbAction(
+                                icon = Icons.Default.TouchApp,
+                                label = if (touchpadMode) AppLocalization.t("触控板", "Pad", lang) else AppLocalization.t("直触", "Direct", lang),
+                                active = touchpadMode
+                            ) {
+                                session.setTouchpadMode(!touchpadMode)
+                            }
+                            QuickOrbAction(
+                                icon = Icons.Default.Mouse,
+                                label = AppLocalization.t("键钮", "Mouse", lang),
+                                active = showVirtualMouseButtons
+                            ) {
+                                showVirtualMouseButtons = !showVirtualMouseButtons
+                                showQuickBar = false
+                            }
+                            if (remoteDisplays.size > 1) {
+                                QuickOrbAction(
+                                    icon = Icons.Default.DesktopWindows,
+                                    label = AppLocalization.t("切屏", "Disp", lang),
+                                    active = switchingDisplay
+                                ) {
+                                    if (!switchingDisplay) {
+                                        val idx = remoteDisplays.indexOfFirst { it.isSelected }
+                                        val next = remoteDisplays[(idx + 1) % remoteDisplays.size]
+                                        session.switchRemoteDisplay(next)
+                                        showQuickBar = false
+                                    }
+                                }
+                            } else {
+                                QuickOrbAction(
+                                    icon = if (audioMuted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
+                                    label = if (audioMuted) AppLocalization.t("静音", "Mute", lang) else AppLocalization.t("声音", "Audio", lang),
+                                    active = !audioMuted
+                                ) {
+                                    session.setAudioMuted(!audioMuted)
+                                }
+                            }
+                            QuickOrbAction(
+                                icon = Icons.Default.Tune,
+                                label = AppLocalization.t("更多", "More", lang),
+                                active = false
+                            ) {
+                                showQuickBar = false
+                                showControlMenu = true
+                            }
                         }
-                    ) { change, dragAmount ->
-                        change.consume()
-                        orbOffsetX = (orbOffsetX + dragAmount.x).coerceIn(8f, (screenW - 54f).coerceAtLeast(8f))
-                        orbOffsetY = (orbOffsetY + dragAmount.y).coerceIn(8f, (screenH - 54f).coerceAtLeast(8f))
                     }
                 }
-                .clickable { showControlMenu = !showControlMenu },
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(
-                imageVector = Icons.Default.Tune,
-                contentDescription = "Controls",
-                tint = NodeDeckColors.AccentLight,
-                modifier = Modifier.size(22.dp)
-            )
+            }
+
+            // Draggable Edge-Snapping Orb
+            Box(
+                modifier = Modifier
+                    .offset { IntOffset(orbOffsetX.roundToInt(), orbOffsetY.roundToInt()) }
+                    .size(46.dp)
+                    .alpha(orbAlpha)
+                    .clip(CircleShape)
+                    .background(Color(0xD9162028))
+                    .border(
+                        width = 1.5.dp,
+                        color = if (showQuickBar) NodeDeckColors.AccentLight else NodeDeckColors.AccentLight.copy(alpha = 0.78f),
+                        shape = CircleShape
+                    )
+                    .pointerInput(screenW, screenH) {
+                        detectDragGestures(
+                            onDragStart = {
+                                orbInteractionTick++
+                                showQuickBar = false
+                            },
+                            onDragEnd = {
+                                orbInteractionTick++
+                                val snapLeft = orbOffsetX < (screenW - orbPx) / 2f
+                                orbOffsetX = if (snapLeft) 14f else (screenW - orbPx - 14f).coerceAtLeast(14f)
+                                orbOffsetY = orbOffsetY.coerceIn(20f, (screenH - orbPx - 20f).coerceAtLeast(20f))
+                            }
+                        ) { change, dragAmount ->
+                            change.consume()
+                            orbOffsetX = (orbOffsetX + dragAmount.x).coerceIn(8f, (screenW - orbPx - 8f).coerceAtLeast(8f))
+                            orbOffsetY = (orbOffsetY + dragAmount.y).coerceIn(8f, (screenH - orbPx - 8f).coerceAtLeast(8f))
+                        }
+                    }
+                    .clickable {
+                        orbInteractionTick++
+                        showQuickBar = !showQuickBar
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = if (showQuickBar) Icons.Default.Close else Icons.Default.Tune,
+                    contentDescription = "Controls",
+                    tint = NodeDeckColors.AccentLight,
+                    modifier = Modifier.size(21.dp)
+                )
+            }
         }
 
-        // Keyboard & Function Key Dock
+        // 8. Auto-Focused Keyboard & Function Key Dock
         if (showKeyboardDock) {
             KeyboardAccessoryDock(
                 modifier = Modifier
@@ -694,7 +1252,7 @@ private fun StreamScreen(
             )
         }
 
-        // Right-Edge Slide-Over Control Sidebar
+        // 9. Right-Edge Slide-Over Control Sidebar
         if (showControlMenu) {
             Box(
                 modifier = Modifier
@@ -705,7 +1263,7 @@ private fun StreamScreen(
             ) {
                 Surface(
                     modifier = Modifier
-                        .width(340.dp)
+                        .width(348.dp)
                         .fillMaxHeight()
                         .clickable(enabled = false) {},
                     shape = RoundedCornerShape(topStart = 20.dp, bottomStart = 20.dp),
@@ -744,7 +1302,7 @@ private fun StreamScreen(
 
                         HorizontalDivider(color = Color(0xFF263340))
 
-                        // Multi-Display Switcher (macOS & Linux hosts over SSH)
+                        // Multi-Display Switcher
                         if (session.hasSshHost) {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
@@ -820,7 +1378,7 @@ private fun StreamScreen(
                             HorizontalDivider(color = Color(0xFF263340))
                         }
 
-                        // Aspect Ratio & Zoom Controls
+                        // Aspect Ratio, Zoom & Screen Orientation
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
@@ -837,13 +1395,13 @@ private fun StreamScreen(
                                     modifier = Modifier.size(15.dp)
                                 )
                                 Text(
-                                    text = AppLocalization.t("画面比例与缩放", "Aspect & Zoom", lang),
+                                    text = AppLocalization.t("画面比例与双指缩放", "Aspect & Pinch Zoom", lang),
                                     style = MaterialTheme.typography.labelMedium,
                                     color = Color(0xFF9EB3C2)
                                 )
                             }
                             Text(
-                                text = "${videoW}×${videoH}",
+                                text = "${videoW}×${videoH} · ${String.format("%.1f×", viewport.zoomScale)}",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = Color(0xFF8AA2B5)
                             )
@@ -852,22 +1410,63 @@ private fun StreamScreen(
                             PillChoice(
                                 label = AppLocalization.t("原比例", "Original Fit", lang),
                                 selected = !fillCropMode,
-                                onClick = { fillCropMode = false }
+                                onClick = {
+                                    fillCropMode = false
+                                    viewport.reset()
+                                }
                             )
                             PillChoice(
                                 label = AppLocalization.t("铺满裁剪", "Fill Crop", lang),
                                 selected = fillCropMode,
-                                onClick = { fillCropMode = true }
+                                onClick = {
+                                    fillCropMode = true
+                                    viewport.reset()
+                                }
                             )
                         }
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            listOf(1.0f to "1.0x", 1.25f to "1.25x", 1.5f to "1.5x", 2.0f to "2.0x").forEach { (scale, lbl) ->
+                            listOf(1.0f to "1.0×", 1.5f to "1.5×", 2.0f to "2.0×", 3.0f to "3.0×").forEach { (scale, lbl) ->
                                 PillChoice(
                                     label = lbl,
-                                    selected = abs(zoomScale - scale) < 0.05f,
-                                    onClick = { zoomScale = scale }
+                                    selected = abs(viewport.zoomScale - scale) < 0.08f,
+                                    onClick = { viewport.setPresetScale(scale) }
                                 )
                             }
+                        }
+
+                        // Screen Orientation Selector (Landscape / Portrait / Auto)
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.Default.ScreenRotation,
+                                contentDescription = null,
+                                tint = NodeDeckColors.AccentLight,
+                                modifier = Modifier.size(15.dp)
+                            )
+                            Text(
+                                text = AppLocalization.t("屏幕方向", "Orientation", lang),
+                                style = MaterialTheme.typography.labelMedium,
+                                color = Color(0xFF9EB3C2)
+                            )
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            PillChoice(
+                                label = AppLocalization.t("横屏", "Landscape", lang),
+                                selected = orientationMode == StreamOrientationMode.LANDSCAPE,
+                                onClick = { onSelectOrientation(StreamOrientationMode.LANDSCAPE) }
+                            )
+                            PillChoice(
+                                label = AppLocalization.t("竖屏", "Portrait", lang),
+                                selected = orientationMode == StreamOrientationMode.PORTRAIT,
+                                onClick = { onSelectOrientation(StreamOrientationMode.PORTRAIT) }
+                            )
+                            PillChoice(
+                                label = AppLocalization.t("自动", "Auto", lang),
+                                selected = orientationMode == StreamOrientationMode.AUTO,
+                                onClick = { onSelectOrientation(StreamOrientationMode.AUTO) }
+                            )
                         }
 
                         HorizontalDivider(color = Color(0xFF263340))
@@ -925,7 +1524,7 @@ private fun StreamScreen(
 
                         HorizontalDivider(color = Color(0xFF263340))
 
-                        // Input, Audio & HUD Controls
+                        // Input, Virtual Mouse, Audio & HUD Controls
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -953,17 +1552,61 @@ private fun StreamScreen(
                             )
                             ControlTileButton(
                                 modifier = Modifier.weight(1f),
+                                icon = Icons.Default.Mouse,
+                                label = AppLocalization.t("虚拟鼠标", "Mouse", lang),
+                                active = showVirtualMouseButtons,
+                                onClick = { showVirtualMouseButtons = !showVirtualMouseButtons }
+                            )
+                            ControlTileButton(
+                                modifier = Modifier.weight(1f),
                                 icon = if (audioMuted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
                                 label = if (audioMuted) AppLocalization.t("已静音", "Muted", lang) else AppLocalization.t("声音", "Audio", lang),
                                 active = !audioMuted,
                                 onClick = { session.setAudioMuted(!audioMuted) }
                             )
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
                             ControlTileButton(
                                 modifier = Modifier.weight(1f),
                                 icon = Icons.Default.Speed,
-                                label = AppLocalization.t("浮窗", "HUD", lang),
+                                label = AppLocalization.t("性能浮窗", "HUD", lang),
                                 active = showHud,
                                 onClick = { session.setShowHud(!showHud) }
+                            )
+                            if (session.hasSshHost) {
+                                ControlTileButton(
+                                    modifier = Modifier.weight(1f),
+                                    icon = Icons.Default.ContentPaste,
+                                    label = AppLocalization.t("推送剪贴板", "Push Clip", lang),
+                                    active = false,
+                                    onClick = { session.pushAndroidClipboardToRemote() }
+                                )
+                                ControlTileButton(
+                                    modifier = Modifier.weight(1f),
+                                    icon = Icons.Default.ContentCopy,
+                                    label = AppLocalization.t("拉取剪贴板", "Pull Clip", lang),
+                                    active = false,
+                                    onClick = { session.pullRemoteClipboardToAndroid() }
+                                )
+                                ControlTileButton(
+                                    modifier = Modifier.weight(1f),
+                                    icon = if (privacyEnabled) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                    label = AppLocalization.t("防窥黑屏", "Privacy", lang),
+                                    active = privacyEnabled,
+                                    onClick = { session.togglePrivacyScreen() }
+                                )
+                            }
+                        }
+
+                        clipboardStatus?.let { msg ->
+                            Text(
+                                text = msg,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = NodeDeckColors.AccentLight
                             )
                         }
 
@@ -988,51 +1631,32 @@ private fun StreamScreen(
                             KeyChip("⌘/Win+Tab") { tapCombo(0x5B, MoonlightNative.MODIFIER_META, 0x09, extMod = true) }
                             KeyChip("Alt+Tab") { tapCombo(0xA4, MoonlightNative.MODIFIER_ALT, 0x09) }
                             KeyChip("⌘+Space") { tapCombo(0x5B, MoonlightNative.MODIFIER_META, 0x20, extMod = true) }
-                            KeyChip("Ctrl+C") { tapCombo(0xA2, MoonlightNative.MODIFIER_CTRL, 0x43) }
-                            KeyChip("Ctrl+V") { tapCombo(0xA2, MoonlightNative.MODIFIER_CTRL, 0x56) }
                             KeyChip("⌘+C") { tapCombo(0x5B, MoonlightNative.MODIFIER_META, 0x43, extMod = true) }
                             KeyChip("⌘+V") { tapCombo(0x5B, MoonlightNative.MODIFIER_META, 0x56, extMod = true) }
+                            KeyChip("⌘+W") { tapCombo(0x5B, MoonlightNative.MODIFIER_META, 0x57, extMod = true) }
+                            KeyChip("Ctrl+C") { tapCombo(0xA2, MoonlightNative.MODIFIER_CTRL, 0x43) }
+                            KeyChip("Ctrl+V") { tapCombo(0xA2, MoonlightNative.MODIFIER_CTRL, 0x56) }
                             KeyChip("Esc") {
                                 MoonlightNative.sendVirtualKey(0x1B, true)
                                 MoonlightNative.sendVirtualKey(0x1B, false)
                             }
                         }
 
-                        // SSH Clipboard & Privacy Screen
-                        if (session.hasSshHost) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                ControlTileButton(
-                                    modifier = Modifier.weight(1f),
-                                    icon = Icons.Default.ContentPaste,
-                                    label = AppLocalization.t("推送剪贴板", "Push Clip", lang),
-                                    active = false,
-                                    onClick = { session.pushAndroidClipboardToRemote() }
-                                )
-                                ControlTileButton(
-                                    modifier = Modifier.weight(1f),
-                                    icon = Icons.Default.ContentCopy,
-                                    label = AppLocalization.t("拉取剪贴板", "Pull Clip", lang),
-                                    active = false,
-                                    onClick = { session.pullRemoteClipboardToAndroid() }
-                                )
-                                ControlTileButton(
-                                    modifier = Modifier.weight(1f),
-                                    icon = if (privacyEnabled) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                                    label = AppLocalization.t("防窥黑屏", "Privacy", lang),
-                                    active = privacyEnabled,
-                                    onClick = { session.togglePrivacyScreen() }
-                                )
-                            }
-                            clipboardStatus?.let { msg ->
-                                Text(
-                                    text = msg,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = NodeDeckColors.AccentLight
-                                )
-                            }
+                        // Compact Gesture Quick-Guide
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = Color(0xFF1A242E)
+                        ) {
+                            Text(
+                                text = AppLocalization.t(
+                                    "手势：双指捏合超过防误触阈值后平滑缩放（最高 4×），放大后双指拖动漫游；双指轻点右键；1× 下双指滑动滚轮。",
+                                    "Gestures: Pinch past deadzone to zoom (up to 4×) & 2-finger pan; 2-finger tap = right-click; 2-finger drag at 1× = scroll.",
+                                    lang
+                                ),
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFF93AABF)
+                            )
                         }
 
                         // Release stuck keys & Session Actions
@@ -1089,6 +1713,67 @@ private fun StreamScreen(
 }
 
 @Composable
+private fun QuickOrbAction(
+    icon: ImageVector,
+    label: String,
+    active: Boolean,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(16.dp))
+            .background(if (active) NodeDeckColors.Accent.copy(alpha = 0.35f) else Color.Transparent)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 7.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(3.dp)
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = label,
+            tint = if (active) NodeDeckColors.AccentLight else Color(0xFFD5E2EC),
+            modifier = Modifier.size(15.dp)
+        )
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            color = Color.White,
+            fontSize = 11.sp,
+            maxLines = 1,
+            softWrap = false
+        )
+    }
+}
+
+@Composable
+private fun VirtualMousePill(
+    label: String,
+    active: Boolean,
+    onClick: () -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(18.dp),
+        color = if (active) NodeDeckColors.Accent.copy(alpha = 0.85f) else Color(0xB8141D26),
+        modifier = Modifier
+            .border(
+                1.dp,
+                if (active) NodeDeckColors.AccentLight else Color(0x668EA8BD),
+                RoundedCornerShape(18.dp)
+            )
+            .clickable(onClick = onClick)
+    ) {
+        Text(
+            text = label,
+            modifier = Modifier.padding(horizontal = 13.dp, vertical = 8.dp),
+            style = MaterialTheme.typography.labelMedium,
+            color = Color.White,
+            maxLines = 1,
+            softWrap = false
+        )
+    }
+}
+
+@Composable
 private fun PillChoice(label: String, selected: Boolean, onClick: () -> Unit) {
     Surface(
         shape = RoundedCornerShape(8.dp),
@@ -1099,7 +1784,9 @@ private fun PillChoice(label: String, selected: Boolean, onClick: () -> Unit) {
             text = label,
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
             style = MaterialTheme.typography.labelMedium,
-            color = if (selected) Color.White else Color(0xFFC2D0DC)
+            color = if (selected) Color.White else Color(0xFFC2D0DC),
+            maxLines = 1,
+            softWrap = false
         )
     }
 }
@@ -1107,7 +1794,7 @@ private fun PillChoice(label: String, selected: Boolean, onClick: () -> Unit) {
 @Composable
 private fun ControlTileButton(
     modifier: Modifier = Modifier,
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    icon: ImageVector,
     label: String,
     active: Boolean,
     onClick: () -> Unit
@@ -1133,7 +1820,8 @@ private fun ControlTileButton(
                 style = MaterialTheme.typography.labelSmall,
                 fontFamily = FontFamily.SansSerif,
                 color = Color.White,
-                maxLines = 1
+                maxLines = 1,
+                softWrap = false
             )
         }
     }
@@ -1148,7 +1836,17 @@ private fun KeyboardAccessoryDock(
     var altSticky by remember { mutableStateOf(false) }
     var shiftSticky by remember { mutableStateOf(false) }
     var winSticky by remember { mutableStateOf(false) }
+    var showFnRow by remember { mutableStateOf(false) }
     var textInput by remember { mutableStateOf("") }
+
+    val focusRequester = remember { FocusRequester() }
+    val keyboardController = LocalSoftwareKeyboardController.current
+
+    LaunchedEffect(Unit) {
+        delay(80L)
+        runCatching { focusRequester.requestFocus() }
+        keyboardController?.show()
+    }
 
     fun currentModifierFlags(): Byte {
         var m = 0
@@ -1180,11 +1878,11 @@ private fun KeyboardAccessoryDock(
         winSticky = false
     }
 
-    fun sendCombo(modVk: Int, modFlag: Byte, keyVk: Int) {
-        MoonlightNative.sendVirtualKey(modVk, true)
+    fun sendCombo(modVk: Int, modFlag: Byte, keyVk: Int, extMod: Boolean = false) {
+        MoonlightNative.sendVirtualKey(modVk, true, extended = extMod)
         MoonlightNative.sendVirtualKey(keyVk, true, modifiers = modFlag)
         MoonlightNative.sendVirtualKey(keyVk, false, modifiers = modFlag)
-        MoonlightNative.sendVirtualKey(modVk, false)
+        MoonlightNative.sendVirtualKey(modVk, false, extended = extMod)
     }
 
     Surface(
@@ -1192,7 +1890,7 @@ private fun KeyboardAccessoryDock(
             .fillMaxWidth()
             .padding(horizontal = 8.dp, vertical = 6.dp),
         shape = RoundedCornerShape(14.dp),
-        color = Color(0xEE131A22)
+        color = Color(0xF0131A22)
     ) {
         Column(
             modifier = Modifier.padding(8.dp),
@@ -1210,7 +1908,10 @@ private fun KeyboardAccessoryDock(
                 KeyChip("Ctrl", active = ctrlSticky) { ctrlSticky = !ctrlSticky }
                 KeyChip("Alt", active = altSticky) { altSticky = !altSticky }
                 KeyChip("Shift", active = shiftSticky) { shiftSticky = !shiftSticky }
-                KeyChip("Super", active = winSticky) { winSticky = !winSticky }
+                KeyChip("⌘/Win", active = winSticky) { winSticky = !winSticky }
+                KeyChip("Fn", active = showFnRow) { showFnRow = !showFnRow }
+                KeyChip("⌘+C") { sendCombo(0x5B, MoonlightNative.MODIFIER_META, 0x43, extMod = true) }
+                KeyChip("⌘+V") { sendCombo(0x5B, MoonlightNative.MODIFIER_META, 0x56, extMod = true) }
                 KeyChip("Ctrl+C") { sendCombo(0xA2, MoonlightNative.MODIFIER_CTRL, 0x43) }
                 KeyChip("Ctrl+V") { sendCombo(0xA2, MoonlightNative.MODIFIER_CTRL, 0x56) }
                 KeyChip("Ctrl+Z") { sendCombo(0xA2, MoonlightNative.MODIFIER_CTRL, 0x5A) }
@@ -1223,6 +1924,24 @@ private fun KeyboardAccessoryDock(
                 KeyChip("Del") { sendTapVk(0x2E, extended = true) }
             }
 
+            if (showFnRow) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    KeyChip("Home") { sendTapVk(0x24, extended = true) }
+                    KeyChip("End") { sendTapVk(0x23, extended = true) }
+                    KeyChip("PgUp") { sendTapVk(0x21, extended = true) }
+                    KeyChip("PgDn") { sendTapVk(0x22, extended = true) }
+                    for (fn in 1..12) {
+                        KeyChip("F$fn") { sendTapVk(0x6F + fn) }
+                    }
+                }
+            }
+
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -1231,9 +1950,11 @@ private fun KeyboardAccessoryDock(
                 OutlinedTextField(
                     value = textInput,
                     onValueChange = { textInput = it },
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier
+                        .weight(1f)
+                        .focusRequester(focusRequester),
                     singleLine = true,
-                    placeholder = { Text("Type text to send to remote…", fontSize = 13.sp) },
+                    placeholder = { Text("输入文本发送到远端…", fontSize = 13.sp) },
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                     keyboardActions = KeyboardActions(onSend = {
                         if (textInput.isNotEmpty()) {
@@ -1258,7 +1979,10 @@ private fun KeyboardAccessoryDock(
                 }) {
                     Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send", tint = NodeDeckColors.AccentLight)
                 }
-                IconButton(onClick = onClose) {
+                IconButton(onClick = {
+                    keyboardController?.hide()
+                    onClose()
+                }) {
                     Icon(Icons.Default.Close, contentDescription = "Close", tint = Color(0xFF9EB3C2))
                 }
             }
@@ -1277,7 +2001,9 @@ private fun KeyChip(label: String, active: Boolean = false, onClick: () -> Unit)
             text = label,
             modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
             style = MaterialTheme.typography.labelSmall,
-            color = Color.White
+            color = Color.White,
+            maxLines = 1,
+            softWrap = false
         )
     }
 }

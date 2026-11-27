@@ -61,6 +61,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.nodedeck.android.core.AppLanguage
 import com.nodedeck.android.core.AppLocalization
@@ -156,17 +157,38 @@ fun HostDetailScreen(
                 Tab(
                     selected = selectedTab == 0,
                     onClick = { selectedTab = 0 },
-                    text = { Text(AppLocalization.t("状态总览", "Overview", lang)) }
+                    text = {
+                        Text(
+                            text = AppLocalization.t("总览", "Overview", lang),
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 )
                 Tab(
                     selected = selectedTab == 1,
                     onClick = { selectedTab = 1 },
-                    text = { Text(AppLocalization.t("远控与网络", "Remote & Net", lang)) }
+                    text = {
+                        Text(
+                            text = AppLocalization.t("远控与网络", "Remote", lang),
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 )
                 Tab(
                     selected = selectedTab == 2,
                     onClick = { selectedTab = 2 },
-                    text = { Text(AppLocalization.t("终端与文件", "Files & Tools", lang)) }
+                    text = {
+                        Text(
+                            text = AppLocalization.t("终端与文件", "Files", lang),
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 )
             }
 
@@ -370,15 +392,29 @@ private fun OverviewTab(
             item {
                 SectionCard(title = AppLocalization.t("高负载进程", "Top Processes", lang)) {
                     metrics.processes.forEach { proc ->
+                        val shortName = proc.command
+                            .trim()
+                            .substringBefore(' ')
+                            .substringAfterLast('/')
+                            .ifBlank { proc.command.trim() }
                         Row(
                             modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text(proc.command, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
+                            Text(
+                                text = shortName,
+                                style = MaterialTheme.typography.bodySmall,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f)
+                            )
                             Text(
                                 text = "CPU ${String.format("%.1f", proc.cpuPercent)}% · MEM ${String.format("%.1f", proc.memPercent)}%",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                softWrap = false
                             )
                         }
                     }
@@ -525,15 +561,34 @@ private fun RemoteAndNetworkTab(
                     }
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        OutlinedButton(modifier = Modifier.weight(1f), onClick = onOpenPair) {
-                            Text(AppLocalization.t("重新配对", "Re-pair", lang))
+                        OutlinedButton(
+                            modifier = Modifier.weight(1f),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                            onClick = onOpenPair
+                        ) {
+                            Text(
+                                text = AppLocalization.t("重新配对", "Re-pair", lang),
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis
+                            )
                         }
-                        OutlinedButton(modifier = Modifier.weight(1f), onClick = onOpenProfile) {
+                        OutlinedButton(
+                            modifier = Modifier.weight(1f),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                            onClick = onOpenProfile
+                        ) {
                             Icon(Icons.Default.Settings, contentDescription = null, modifier = Modifier.size(15.dp))
                             Spacer(Modifier.width(4.dp))
-                            Text(AppLocalization.t("多用户配置", "Host Profile", lang))
+                            Text(
+                                text = AppLocalization.t("多用户配置", "Profile", lang),
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis
+                            )
                         }
                         IconButton(onClick = onUnpair) {
                             Icon(Icons.Default.Delete, contentDescription = "Unpair", tint = MaterialTheme.colorScheme.error)
