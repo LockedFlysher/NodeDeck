@@ -2034,12 +2034,26 @@ print(f"OK:{{detected_port}}")
     def launch_stream(self, saved):
         threading.Thread(target=self._launch_stream_worker, args=(saved,), daemon=True).start()
 
+    def _show_stream_error(self, msg: str):
+        self.status_label.set_text(f"Stream error: {msg}")
+        dlg = Gtk.MessageDialog(
+            transient_for=self,
+            flags=0,
+            message_type=Gtk.MessageType.ERROR,
+            buttons=Gtk.ButtonsType.OK,
+            text=self.t("远程桌面连接失败", "Remote Desktop Failed"),
+        )
+        dlg.format_secondary_text(msg)
+        dlg.run()
+        dlg.destroy()
+
     def _launch_stream_worker(self, saved):
         try:
             cert, key, uid = ensure_client_cert()
             ctx = ssl._create_unverified_context()
+            ctx.maximum_version = ssl.TLSVersion.TLSv1_2
             ctx.load_cert_chain(certfile=str(cert), keyfile=str(key))
-            addr, http_port, https_port = saved["address"], saved["httpPort"], saved["httpsPort"]
+            addr, http_port, https_port = saved["address"], int(saved["httpPort"]), int(saved["httpsPort"])
             w_str, h_str = self.stream_resolution.split("x")
             fps_str = self.stream_fps
             mode_str = f"{w_str}x{h_str}x{fps_str}"
@@ -2048,14 +2062,26 @@ print(f"OK:{{detected_port}}")
             raw_bitrate = 20000.0 * (pixel_ratio ** 0.72) * (fps_ratio ** 0.75)
             bitrate_kbps = max(20000, min(120000, int(round(raw_bitrate / 5000.0)) * 5000))
 
-            info_xml = urllib.request.urlopen(f"http://{addr}:{http_port}/serverinfo?uniqueid={uid}", timeout=8).read()
+            opener = urllib.request.build_opener(
+                urllib.request.ProxyHandler({}),
+                urllib.request.HTTPSHandler(context=ctx),
+            )
+
+            info_xml = opener.open(f"http://{addr}:{http_port}/serverinfo?uniqueid={uid}", timeout=8).read()
             info = ET.fromstring(info_xml)
             appver = info.findtext("appversion") or "7.1.431.0"
             gfever = info.findtext("GfeVersion") or "3.23.0.74"
             codec_support = info.findtext("ServerCodecModeSupport") or "0"
+            current_game = (info.findtext("currentgame") or "0").strip()
+            server_state = (info.findtext("state") or "").upper()
 
-            apps_xml = urllib.request.urlopen(f"https://{addr}:{https_port}/applist?uniqueid={uid}", context=ctx, timeout=8).read()
-            apps = ET.fromstring(apps_xml).findall("App")
+            apps_xml = opener.open(f"https://{addr}:{https_port}/applist?uniqueid={uid}", timeout=8).read()
+            apps_root = ET.fromstring(apps_xml)
+            if apps_root.attrib.get("status_code", "200") != "200":
+                raise RuntimeError(apps_root.attrib.get("status_message") or "Client certificate not paired on host")
+            apps = apps_root.findall("App")
+            if not apps:
+                raise RuntimeError("No applications published on remote Sunshine host")
             app_id = next((a.findtext("ID") for a in apps if "desktop" in (a.findtext("AppTitle") or "").lower()), apps[0].findtext("ID"))
 
             rikey = secrets.token_hex(16)
@@ -2065,21 +2091,55 @@ print(f"OK:{{detected_port}}")
                 "additionalStates": "1", "sops": "0", "rikey": rikey, "rikeyid": rikeyid,
                 "localAudioPlayMode": "0", "surroundAudioInfo": "196610",
             })
-            launch_xml = urllib.request.urlopen(f"https://{addr}:{https_port}/launch?{q}", context=ctx, timeout=15).read()
-            rtsp = ET.fromstring(launch_xml).findtext("sessionUrl0") or f"rtsp://{addr}:48010"
+
+            def call_session(ep: str):
+                raw = opener.open(f"https://{addr}:{https_port}/{ep}?{q}", timeout=15).read()
+                root = ET.fromstring(raw)
+                return root.attrib.get("status_code", "200"), root.attrib.get("status_message", ""), (root.findtext("sessionUrl0") or "").strip()
+
+            primary_ep = "resume" if (current_game != "0" or "BUSY" in server_state) else "launch"
+            sc, sm, rtsp = call_session(primary_ep)
+            if sc != "200" or not rtsp:
+                # If resume failed or another stale session blocked launch, try cancel + launch once
+                try:
+                    opener.open(f"https://{addr}:{https_port}/cancel?uniqueid={uid}", timeout=6).read()
+                except Exception:
+                    pass
+                sc, sm, rtsp = call_session("launch")
+            if sc != "200" or not rtsp:
+                raise RuntimeError(f"Sunshine HTTP {sc}: {sm or 'Failed to start streaming session'}")
 
             stream_bin = resolve_stream_bin()
-            subprocess.Popen([
-                stream_bin, "--host", addr, "--appver", appver, "--gfever", gfever,
-                "--rtsp", rtsp, "--rikey", rikey, "--rikeyid", rikeyid,
-                "--width", w_str, "--height", h_str, "--fps", fps_str,
-                "--bitrate", str(bitrate_kbps),
-                "--codec-support", codec_support,
-                "--hwaccel", self.stream_hwaccel,
-            ])
+            CONF_DIR.mkdir(parents=True, exist_ok=True)
+            log_path = CONF_DIR / "stream-last.log"
+            log_fh = open(log_path, "w", encoding="utf-8")
+            proc = subprocess.Popen(
+                [
+                    stream_bin, "--host", addr, "--appver", appver, "--gfever", gfever,
+                    "--rtsp", rtsp, "--rikey", rikey, "--rikeyid", rikeyid,
+                    "--width", w_str, "--height", h_str, "--fps", fps_str,
+                    "--bitrate", str(bitrate_kbps),
+                    "--codec-support", codec_support,
+                    "--hwaccel", self.stream_hwaccel,
+                ],
+                stdout=log_fh,
+                stderr=log_fh,
+            )
+            log_fh.close()
             GLib.idle_add(self.status_label.set_text, f"Streaming {addr} ({mode_str}, {bitrate_kbps // 1000} Mbps, hwaccel={self.stream_hwaccel})")
+
+            # Watch for immediate crash/exit without blocking long-running streams on a pipe buffer
+            time.sleep(2.5)
+            rc = proc.poll()
+            if rc is not None and rc != 0:
+                detail = ""
+                try:
+                    detail = log_path.read_text(encoding="utf-8", errors="ignore").strip()
+                except Exception:
+                    pass
+                GLib.idle_add(self._show_stream_error, (detail[-400:] if detail else f"nodedeck-stream exited with code {rc}"))
         except Exception as exc:
-            GLib.idle_add(self.status_label.set_text, f"Stream error: {exc}")
+            GLib.idle_add(self._show_stream_error, str(exc))
 
 
 if __name__ == "__main__":
