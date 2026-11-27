@@ -56,11 +56,13 @@ extension HostMonitor {
         if localSunshineHostState == .running {
             SunshineHostManager.shared.stopHost()
             refreshLocalSunshineHostState()
+            Task { await syncAccountState(silent: true) }
             showFeedback(.info, "已停止本机 Sunshine 被控端服务。")
         } else {
             do {
                 _ = try SunshineHostManager.shared.startHost()
                 refreshLocalSunshineHostState()
+                Task { await syncAccountState(silent: true) }
                 showFeedback(.success, "已启动本机 Sunshine 被控端服务（可被其他 NodeDeck 远控）。")
             } catch {
                 let msg = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription

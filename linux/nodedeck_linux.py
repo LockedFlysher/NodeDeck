@@ -32,6 +32,20 @@ CERT_DIR = CONF_DIR / "moonlight"
 SSH_MUX_DIR = Path(f"/tmp/ndmux-{os.getuid()}")
 
 
+DEFAULT_CONTROL_SERVER = "https://lockedflysher.duckdns.org:8443/nodedeck-api"
+ACCOUNT_FILE = CONF_DIR / "account.json"
+
+
+def load_account_session() -> dict:
+    for p in (Path("/etc/nodedeck/account.json"), ACCOUNT_FILE):
+        try:
+            if p.exists():
+                return json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
 def detect_default_lang() -> str:
     env_lang = (os.getenv("LC_ALL") or os.getenv("LANG") or "").lower()
     return "zh" if env_lang.startswith("zh") else "en"
@@ -479,6 +493,10 @@ class NodeDeckWindow(Gtk.Window):
         self.btn_host.connect("clicked", self.on_toggle_local_host)
         self.hb.pack_start(self.btn_host)
 
+        self.btn_account = Gtk.Button()
+        self.btn_account.connect("clicked", self.on_open_account_dialog)
+        self.hb.pack_start(self.btn_account)
+
         self.btn_refresh = Gtk.Button()
         self.btn_refresh.connect("clicked", lambda *_: (self._update_chrome_labels(), self.reload_hosts()))
         self.hb.pack_end(self.btn_refresh)
@@ -538,8 +556,168 @@ class NodeDeckWindow(Gtk.Window):
             self.btn_host.set_label(self.t("○ 启动本机被控端", "○ Start Local Host"))
             self.btn_host.set_sensitive(True)
         self.btn_refresh.set_label(self.t("刷新", "Refresh"))
+        acct = load_account_session()
+        acct_user = acct.get("user", {}).get("username")
+        acct_ip = acct.get("device", {}).get("virtual_ip")
+        if acct_user:
+            self.btn_account.set_label(f"● {acct_user} ({acct_ip})" if acct_ip else f"● {acct_user}")
+        else:
+            self.btn_account.set_label(self.t("登录 / 组网", "Sign In / Mesh"))
         self.btn_lang.set_label("EN" if self.lang == "zh" else "中文")
         self.btn_arch.set_label(self.t("技术原理与安全", "How It Works"))
+
+    def on_open_account_dialog(self, _btn):
+        acct = load_account_session()
+        dlg = Gtk.Dialog(
+            title=self.t("NodeDeck 统一账号与内置组网", "NodeDeck Account & Built-in Mesh"),
+            transient_for=self,
+            flags=0,
+        )
+        dlg.set_default_size(460, 360)
+        box = dlg.get_content_area()
+        box.set_spacing(10)
+        box.set_margin_top(14)
+        box.set_margin_bottom(14)
+        box.set_margin_start(16)
+        box.set_margin_end(16)
+
+        if acct.get("token"):
+            user = acct.get("user", {}).get("username", "")
+            dev = acct.get("device", {})
+            info = Gtk.Label(
+                label=self.t(
+                    f"已登录账号：{user}\n本机节点：{dev.get('device_name', '')} ({dev.get('virtual_cidr', '')})\n控制服务器：{acct.get('server_url', DEFAULT_CONTROL_SERVER)}",
+                    f"Signed in as: {user}\nDevice: {dev.get('device_name', '')} ({dev.get('virtual_cidr', '')})\nServer: {acct.get('server_url', DEFAULT_CONTROL_SERVER)}",
+                )
+            )
+            info.set_xalign(0)
+            box.pack_start(info, False, False, 0)
+
+            devs = acct.get("devices", [])
+            dev_lines = [
+                f"• {d.get('device_name')} [{d.get('platform')}/{d.get('role')}] — {d.get('virtual_ip')} ({'online' if d.get('online') else 'offline'})"
+                for d in devs
+            ]
+            lbl_devs = Gtk.Label(label="\n".join(dev_lines) if dev_lines else self.t("暂无其他设备", "No other devices"))
+            lbl_devs.set_xalign(0)
+            box.pack_start(lbl_devs, False, False, 4)
+
+            dlg.add_buttons(
+                self.t("退出登录", "Sign Out"),
+                Gtk.ResponseType.REJECT,
+                self.t("同步设备", "Sync"),
+                Gtk.ResponseType.APPLY,
+                self.t("关闭", "Close"),
+                Gtk.ResponseType.OK,
+            )
+            dlg.show_all()
+            resp = dlg.run()
+            dlg.destroy()
+            if resp == Gtk.ResponseType.REJECT:
+                try:
+                    agent = Path("/opt/nodedeck/nodedeck_mesh_agent.py")
+                    if not agent.exists():
+                        agent = Path(__file__).resolve().parent / "nodedeck_mesh_agent.py"
+                    subprocess.run(["python3", str(agent), "logout"], timeout=10)
+                except Exception:
+                    pass
+                self._update_chrome_labels()
+            elif resp == Gtk.ResponseType.APPLY:
+                self._sync_account_devices_to_linux(acct)
+                self.reload_hosts()
+            return
+
+        # Login / Register form
+        mode_combo = Gtk.ComboBoxText()
+        mode_combo.append("login", self.t("登录已有账号", "Sign In"))
+        mode_combo.append("register", self.t("使用邀请码注册", "Register with Invite Code"))
+        mode_combo.set_active(0)
+        box.pack_start(mode_combo, False, False, 0)
+
+        ent_user = Gtk.Entry()
+        ent_user.set_placeholder_text(self.t("用户名", "Username"))
+        box.pack_start(ent_user, False, False, 0)
+
+        ent_pass = Gtk.Entry()
+        ent_pass.set_visibility(False)
+        ent_pass.set_placeholder_text(self.t("密码", "Password"))
+        box.pack_start(ent_pass, False, False, 0)
+
+        ent_invite = Gtk.Entry()
+        ent_invite.set_placeholder_text(self.t("邀请码（注册必填）", "Invite Code (required for registration)"))
+        box.pack_start(ent_invite, False, False, 0)
+
+        ent_server = Gtk.Entry()
+        ent_server.set_text(DEFAULT_CONTROL_SERVER)
+        box.pack_start(ent_server, False, False, 0)
+
+        def on_mode_change(_cb):
+            ent_invite.set_visible(mode_combo.get_active_id() == "register")
+
+        mode_combo.connect("changed", on_mode_change)
+        dlg.add_buttons(
+            self.t("取消", "Cancel"),
+            Gtk.ResponseType.CANCEL,
+            self.t("确认并组网", "Continue"),
+            Gtk.ResponseType.OK,
+        )
+        dlg.show_all()
+        ent_invite.set_visible(False)
+        resp = dlg.run()
+        mode = mode_combo.get_active_id()
+        u = ent_user.get_text().strip()
+        p = ent_pass.get_text()
+        inv = ent_invite.get_text().strip()
+        srv = ent_server.get_text().strip() or DEFAULT_CONTROL_SERVER
+        dlg.destroy()
+
+        if resp != Gtk.ResponseType.OK or not u or not p:
+            return
+
+        agent = Path("/opt/nodedeck/nodedeck_mesh_agent.py")
+        if not agent.exists():
+            agent = Path(__file__).resolve().parent / "nodedeck_mesh_agent.py"
+        cmd = ["python3", str(agent), mode, "--server", srv, "--username", u, "--password", p, "--role", "both"]
+        if mode == "register":
+            cmd += ["--invite", inv]
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+        if res.returncode == 0:
+            new_acct = load_account_session()
+            self._sync_account_devices_to_linux(new_acct)
+            self._update_chrome_labels()
+            self.reload_hosts()
+            self.status_label.set_text(self.t(f"已登录 {u} 并同步设备", f"Signed in as {u}"))
+        else:
+            err = (res.stderr or res.stdout).strip()
+            self.status_label.set_text(self.t(f"认证失败: {err}", f"Auth failed: {err}"))
+
+    def _sync_account_devices_to_linux(self, acct: dict):
+        if not acct:
+            return
+        self_id = acct.get("device", {}).get("device_id")
+        sunshine_hosts = load_json(SUNSHINE_FILE, [])
+        for dev in acct.get("devices", []):
+            if dev.get("device_id") == self_id:
+                continue
+            if dev.get("role") not in ("host", "both") or not dev.get("virtual_ip"):
+                continue
+            if dev.get("sunshine_enabled"):
+                alias = dev["device_name"]
+                ip = dev["virtual_ip"]
+                existing = next((s for s in sunshine_hosts if s.get("hostAlias") == alias or s.get("address") == ip), None)
+                entry = {
+                    "hostAlias": alias,
+                    "address": ip,
+                    "httpPort": int(dev.get("sunshine_http_port") or 47989),
+                    "httpsPort": int(dev.get("sunshine_https_port") or 47984),
+                    "serverName": alias,
+                    "isPaired": True,
+                }
+                if existing:
+                    existing.update(entry)
+                else:
+                    sunshine_hosts.append(entry)
+        save_json(SUNSHINE_FILE, sunshine_hosts)
 
     def on_toggle_local_host(self, _btn):
         host_bin = resolve_host_bin()

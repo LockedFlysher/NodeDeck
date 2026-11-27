@@ -144,6 +144,58 @@ public final class SunshineHostManager: @unchecked Sendable {
         return proc.processIdentifier
     }
 
+    /// Injects authenticated account clients' public Moonlight X.509 certificates into local
+    /// macOS NodeDeckHost's `host_state.json` so same-account devices pair automatically.
+    @discardableResult
+    public func syncAccountClientCertificates(_ certs: [ControlPlaneClientCert]) -> Bool {
+        guard !certs.isEmpty else { return false }
+        _ = try? Self.ensureDefaultConfig()
+        let stateURL = Self.hostConfigDirectoryURL.appendingPathComponent("host_state.json")
+
+        var state: [String: Any] = [:]
+        if let data = try? Data(contentsOf: stateURL),
+           let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            state = parsed
+        }
+        var root = (state["root"] as? [String: Any]) ?? [:]
+        if (root["uniqueid"] as? String)?.isEmpty ?? true {
+            root["uniqueid"] = UUID().uuidString.uppercased()
+        }
+        var devices = (root["named_devices"] as? [[String: Any]]) ?? []
+        var existingCerts = Set(devices.compactMap { ($0["cert"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) })
+
+        var changed = false
+        for cert in certs {
+            let pem = cert.certPem.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard pem.contains("BEGIN CERTIFICATE"), !existingCerts.contains(pem) else { continue }
+            let devName = cert.deviceName.isEmpty ? "NodeDeck-Client" : cert.deviceName
+            devices.removeAll { ($0["name"] as? String) == devName }
+            devices.append([
+                "name": devName,
+                "uuid": UUID().uuidString.uppercased(),
+                "cert": pem + "\n"
+            ])
+            existingCerts.insert(pem)
+            changed = true
+        }
+
+        guard changed else { return false }
+        root["named_devices"] = devices
+        state["root"] = root
+
+        if let outData = try? JSONSerialization.data(withJSONObject: state, options: [.prettyPrinted, .sortedKeys]) {
+            try? outData.write(to: stateURL, options: .atomic)
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: stateURL.path)
+        }
+
+        if currentState() == .running {
+            stopHost()
+            usleep(400_000)
+            _ = try? startHost()
+        }
+        return true
+    }
+
     public func stopHost() {
         let proc = lock.withLock { () -> Process? in
             let p = managedProcess

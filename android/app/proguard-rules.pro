@@ -1,0 +1,3 @@
+-keep class com.nodedeck.android.stream.MoonlightNative { *; }
+-keep class com.nodedeck.android.stream.MoonlightCryptoBridge { *; }
+-keep class com.jcraft.jsch.** { *; }

@@ -43,6 +43,10 @@ struct ContentView: View {
         .sheet(isPresented: $store.isShowingArchitectureGuide) {
             ArchitectureGuideSheet()
         }
+        .sheet(isPresented: $store.isShowingAccountSheet) {
+            AccountSheet()
+                .environmentObject(store)
+        }
         .alert(
             l10n.t("删除设备 \"\(store.hostPendingDeletion?.alias ?? "")\"？", "Delete Device \"\(store.hostPendingDeletion?.alias ?? "")\"?"),
             isPresented: Binding(

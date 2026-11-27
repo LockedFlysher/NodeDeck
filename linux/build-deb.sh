@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-VERSION="${VERSION:-2.0.0}"
+VERSION="${VERSION:-2.1.0}"
 BUNDLE_HOST="${BUNDLE_HOST:-1}"
 if [[ -z "${HOST_SRC_DIR:-}" ]]; then
   if [[ -x "$ROOT/.build/host-linux/bin/nodedeck-host" ]]; then
@@ -21,7 +21,9 @@ rm -rf "$STAGE"
 mkdir -p \
   "$STAGE/DEBIAN" \
   "$STAGE/opt/nodedeck" \
+  "$STAGE/opt/nodedeck/easytier" \
   "$STAGE/usr/local/bin" \
+  "$STAGE/usr/lib/systemd/system" \
   "$STAGE/usr/lib/systemd/user" \
   "$STAGE/usr/share/applications" \
   "$STAGE/usr/share/icons/hicolor/256x256/apps" \
@@ -55,6 +57,16 @@ done
   -o "$STAGE/opt/nodedeck/nodedeck-stream"
 
 install -m 0755 "$ROOT/linux/nodedeck_linux.py" "$STAGE/opt/nodedeck/nodedeck_linux.py"
+install -m 0755 "$ROOT/linux/nodedeck_mesh_agent.py" "$STAGE/opt/nodedeck/nodedeck_mesh_agent.py"
+install -m 0644 "$ROOT/linux/nodedeck-mesh.service" "$STAGE/usr/lib/systemd/system/nodedeck-mesh.service"
+if [[ -x "/usr/local/bin/easytier-core" ]]; then
+  install -m 0755 "/usr/local/bin/easytier-core" "$STAGE/opt/nodedeck/easytier/easytier-core"
+fi
+cat > "$STAGE/usr/local/bin/nodedeck-mesh" <<'EOF'
+#!/usr/bin/env bash
+exec python3 /opt/nodedeck/nodedeck_mesh_agent.py "$@"
+EOF
+chmod 0755 "$STAGE/usr/local/bin/nodedeck-mesh"
 if [[ -f "$ROOT/linux/nodedeck.png" ]]; then
   install -m 0644 "$ROOT/linux/nodedeck.png" "$STAGE/opt/nodedeck/nodedeck.png"
   install -m 0644 "$ROOT/linux/nodedeck.png" "$STAGE/usr/share/icons/hicolor/256x256/apps/nodedeck.png"

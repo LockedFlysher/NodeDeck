@@ -1,0 +1,516 @@
+import Foundation
+
+public struct ControlPlaneUser: Codable, Equatable, Sendable {
+    public let username: String
+
+    public init(username: String = "") {
+        self.username = username
+    }
+}
+
+public struct ControlPlaneDevice: Codable, Identifiable, Equatable, Sendable {
+    public var id: String { deviceId }
+    public let deviceId: String
+    public let deviceName: String
+    public let platform: String
+    public let role: String
+    public let virtualIp: String
+    public let virtualCidr: String
+    public let sshUser: String
+    public let sshPort: Int
+    public let sunshineHttpPort: Int
+    public let sunshineHttpsPort: Int
+    public let sunshineEnabled: Bool
+    public let online: Bool
+    public let lastSeen: Int64
+
+    enum CodingKeys: String, CodingKey {
+        case deviceId = "device_id"
+        case deviceName = "device_name"
+        case platform
+        case role
+        case virtualIp = "virtual_ip"
+        case virtualCidr = "virtual_cidr"
+        case sshUser = "ssh_user"
+        case sshPort = "ssh_port"
+        case sunshineHttpPort = "sunshine_http_port"
+        case sunshineHttpsPort = "sunshine_https_port"
+        case sunshineEnabled = "sunshine_enabled"
+        case online
+        case lastSeen = "last_seen"
+    }
+}
+
+public struct ControlPlaneMeshInfo: Codable, Equatable, Sendable {
+    public let networkName: String
+    public let networkSecret: String
+    public let subnet: String
+    public let seedUri: String
+    public let listenPort: Int
+
+    enum CodingKeys: String, CodingKey {
+        case networkName = "network_name"
+        case networkSecret = "network_secret"
+        case subnet
+        case seedUri = "seed_uri"
+        case listenPort = "listen_port"
+    }
+}
+
+public struct ControlPlaneClientCert: Codable, Equatable, Sendable {
+    public let deviceId: String
+    public let deviceName: String
+    public let uniqueId: String
+    public let certPem: String
+
+    enum CodingKeys: String, CodingKey {
+        case deviceId = "device_id"
+        case deviceName = "device_name"
+        case uniqueId = "unique_id"
+        case certPem = "cert_pem"
+    }
+}
+
+public struct ControlPlaneStateResponse: Codable, Sendable {
+    public let token: String?
+    public let user: ControlPlaneUser
+    public let device: ControlPlaneDevice
+    public let mesh: ControlPlaneMeshInfo
+    public let devices: [ControlPlaneDevice]
+    public let clientCerts: [ControlPlaneClientCert]
+
+    enum CodingKeys: String, CodingKey {
+        case token, user, device, mesh, devices
+        case clientCerts = "client_certs"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        token = try c.decodeIfPresent(String.self, forKey: .token)
+        user = try c.decode(ControlPlaneUser.self, forKey: .user)
+        device = try c.decode(ControlPlaneDevice.self, forKey: .device)
+        mesh = try c.decode(ControlPlaneMeshInfo.self, forKey: .mesh)
+        devices = try c.decodeIfPresent([ControlPlaneDevice].self, forKey: .devices) ?? []
+        clientCerts = try c.decodeIfPresent([ControlPlaneClientCert].self, forKey: .clientCerts) ?? []
+    }
+}
+
+public struct AccountSession: Codable, Equatable, Sendable {
+    public var serverUrl: String
+    public var username: String
+    public var token: String
+    public var deviceId: String
+    public var deviceName: String
+    public var virtualIp: String
+    public var virtualCidr: String
+    public var mesh: ControlPlaneMeshInfo?
+
+    public var isLoggedIn: Bool {
+        !token.isEmpty && !username.isEmpty
+    }
+
+    public init(
+        serverUrl: String = ControlPlaneClient.defaultServerURL,
+        username: String = "",
+        token: String = "",
+        deviceId: String = "",
+        deviceName: String = "",
+        virtualIp: String = "",
+        virtualCidr: String = "",
+        mesh: ControlPlaneMeshInfo? = nil
+    ) {
+        self.serverUrl = serverUrl
+        self.username = username
+        self.token = token
+        self.deviceId = deviceId
+        self.deviceName = deviceName
+        self.virtualIp = virtualIp
+        self.virtualCidr = virtualCidr
+        self.mesh = mesh
+    }
+}
+
+public enum ControlPlaneError: LocalizedError {
+    case invalidURL
+    case serverError(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .invalidURL:
+            return "Invalid Control Plane Server URL"
+        case .serverError(let msg):
+            return msg
+        }
+    }
+}
+
+public final class ControlPlaneClient: Sendable {
+    public static let defaultServerURL = "https://lockedflysher.duckdns.org:8443/nodedeck-api"
+
+    private let session: URLSession
+
+    public init() {
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.timeoutIntervalForRequest = 12
+        cfg.timeoutIntervalForResource = 15
+        self.session = URLSession(configuration: cfg)
+    }
+
+    private func localHostCapabilities() -> (role: String, sunshineEnabled: Bool, httpPort: Int, httpsPort: Int, sshUser: String) {
+        let running = SunshineHostManager.shared.currentState() == .running
+        return (
+            role: running ? "both" : "controller",
+            sunshineEnabled: running,
+            httpPort: 47989,
+            httpsPort: 47984,
+            sshUser: NSUserName()
+        )
+    }
+
+    public func register(
+        serverUrl: String,
+        username: String,
+        password: String,
+        inviteCode: String,
+        deviceId: String,
+        deviceName: String
+    ) async throws -> ControlPlaneStateResponse {
+        let cap = localHostCapabilities()
+        let payload: [String: Any] = [
+            "username": username,
+            "password": password,
+            "invite_code": inviteCode,
+            "device_id": deviceId,
+            "device_name": deviceName,
+            "platform": "macos",
+            "role": cap.role,
+            "ssh_user": cap.sshUser,
+            "ssh_port": 22,
+            "sunshine_http_port": cap.httpPort,
+            "sunshine_https_port": cap.httpsPort,
+            "sunshine_enabled": cap.sunshineEnabled,
+            "lan_ips": EmbeddedEasyTierManager.discoverLanIPs()
+        ]
+        return try await postJSON(serverUrl: serverUrl, path: "/api/v1/auth/register", payload: payload, token: nil)
+    }
+
+    public func login(
+        serverUrl: String,
+        username: String,
+        password: String,
+        deviceId: String,
+        deviceName: String
+    ) async throws -> ControlPlaneStateResponse {
+        let cap = localHostCapabilities()
+        let payload: [String: Any] = [
+            "username": username,
+            "password": password,
+            "device_id": deviceId,
+            "device_name": deviceName,
+            "platform": "macos",
+            "role": cap.role,
+            "ssh_user": cap.sshUser,
+            "ssh_port": 22,
+            "sunshine_http_port": cap.httpPort,
+            "sunshine_https_port": cap.httpsPort,
+            "sunshine_enabled": cap.sunshineEnabled,
+            "lan_ips": EmbeddedEasyTierManager.discoverLanIPs()
+        ]
+        return try await postJSON(serverUrl: serverUrl, path: "/api/v1/auth/login", payload: payload, token: nil)
+    }
+
+    public func heartbeat(
+        serverUrl: String,
+        token: String,
+        deviceName: String,
+        meshIpv4: String
+    ) async throws -> ControlPlaneStateResponse {
+        let cap = localHostCapabilities()
+        let payload: [String: Any] = [
+            "device_name": deviceName,
+            "platform": "macos",
+            "role": cap.role,
+            "ssh_user": cap.sshUser,
+            "ssh_port": 22,
+            "sunshine_http_port": cap.httpPort,
+            "sunshine_https_port": cap.httpsPort,
+            "sunshine_enabled": cap.sunshineEnabled,
+            "lan_ips": EmbeddedEasyTierManager.discoverLanIPs(excludingSubnetOf: meshIpv4)
+        ]
+        return try await postJSON(serverUrl: serverUrl, path: "/api/v1/devices/heartbeat", payload: payload, token: token)
+    }
+
+    public func registerClientCert(
+        serverUrl: String,
+        token: String,
+        deviceName: String,
+        uniqueId: String,
+        certPem: String
+    ) async throws {
+        let base = serverUrl.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
+        guard let url = URL(string: "\(base)/api/v1/certs/register") else {
+            throw ControlPlaneError.invalidURL
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        let body: [String: Any] = [
+            "device_name": deviceName,
+            "unique_id": uniqueId,
+            "cert_pem": certPem
+        ]
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (data, resp) = try await session.data(for: req)
+        if let http = resp as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+            let text = String(data: data, encoding: .utf8) ?? "HTTP \(http.statusCode)"
+            throw ControlPlaneError.serverError(text)
+        }
+    }
+
+    public func logout(serverUrl: String, token: String) async {
+        let base = serverUrl.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
+        guard let url = URL(string: "\(base)/api/v1/auth/logout") else { return }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        req.httpBody = Data("{}".utf8)
+        _ = try? await session.data(for: req)
+    }
+
+    private func postJSON(
+        serverUrl: String,
+        path: String,
+        payload: [String: Any],
+        token: String?
+    ) async throws -> ControlPlaneStateResponse {
+        let base = serverUrl.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
+        guard let url = URL(string: "\(base)\(path)") else {
+            throw ControlPlaneError.invalidURL
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
+        if let token, !token.isEmpty {
+            req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        req.httpBody = try JSONSerialization.data(withJSONObject: payload)
+        let (data, resp) = try await session.data(for: req)
+        if let http = resp as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+            if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let err = obj["error"] as? String, !err.isEmpty {
+                throw ControlPlaneError.serverError(err)
+            }
+            let text = String(data: data, encoding: .utf8) ?? "HTTP \(http.statusCode)"
+            throw ControlPlaneError.serverError(text)
+        }
+        return try JSONDecoder().decode(ControlPlaneStateResponse.self, from: data)
+    }
+}
+
+public enum EmbeddedEasyTierManager {
+    public static var appSupportDir: URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support")
+        return base.appendingPathComponent("NodeDeck", isDirectory: true)
+    }
+
+    public static var accountFileURL: URL {
+        appSupportDir.appendingPathComponent("account.json")
+    }
+
+    public static var meshDirURL: URL {
+        appSupportDir.appendingPathComponent("mesh", isDirectory: true)
+    }
+
+    public static var runtimeTomlURL: URL {
+        meshDirURL.appendingPathComponent("runtime.toml")
+    }
+
+    public static var deviceIdKey: String { "nodedeck.controlPlane.deviceId" }
+
+    public static func getOrCreateDeviceId() -> String {
+        if let existing = UserDefaults.standard.string(forKey: deviceIdKey), !existing.isEmpty {
+            return existing
+        }
+        let created = "macos-\(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(12).lowercased())"
+        UserDefaults.standard.set(created, forKey: deviceIdKey)
+        return created
+    }
+
+    public static func loadSession() -> AccountSession {
+        guard let data = try? Data(contentsOf: accountFileURL),
+              let sess = try? JSONDecoder().decode(AccountSession.self, from: data) else {
+            return AccountSession()
+        }
+        return sess
+    }
+
+    public static func saveSession(_ session: AccountSession) {
+        try? FileManager.default.createDirectory(at: appSupportDir, withIntermediateDirectories: true)
+        if let data = try? JSONEncoder().encode(session) {
+            try? data.write(to: accountFileURL, options: .atomic)
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: accountFileURL.path)
+        }
+    }
+
+    public static func resolveEasyTierBinary() -> String? {
+        var candidates: [String] = []
+        if let bundlePath = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/easytier-core").path as String? {
+            candidates.append(bundlePath)
+        }
+        candidates.append("/usr/local/bin/easytier-core")
+        candidates.append("/opt/homebrew/bin/easytier-core")
+        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+
+    public static func discoverLanIPs(excludingSubnetOf meshIpv4: String = "") -> [String] {
+        let prefix3: String
+        let parts = meshIpv4.split(separator: "/").first?.split(separator: ".") ?? []
+        if parts.count == 4 {
+            prefix3 = "\(parts[0]).\(parts[1]).\(parts[2])."
+        } else {
+            prefix3 = ""
+        }
+        var results = Set<String>()
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return [] }
+        defer { freeifaddrs(ifaddr) }
+
+        var ptr: UnsafeMutablePointer<ifaddrs>? = first
+        while let current = ptr {
+            let name = String(cString: current.pointee.ifa_name)
+            if name.hasPrefix("en"),
+               let sa = current.pointee.ifa_addr,
+               sa.pointee.sa_family == UInt8(AF_INET) {
+                var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                if getnameinfo(sa, socklen_t(sa.pointee.sa_len), &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST) == 0 {
+                    let ip = String(cString: host)
+                    if !ip.hasPrefix("127.") && !ip.hasPrefix("169.254.") && (prefix3.isEmpty || !ip.hasPrefix(prefix3)) {
+                        results.insert(ip)
+                    }
+                }
+            }
+            ptr = current.pointee.ifa_next
+        }
+        return results.sorted()
+    }
+
+    /// Expands seed URI(s) so UDP relay is tried first (avoiding TCP-over-TCP jitter on relay fallback)
+    /// while keeping TCP as automatic fallback when UDP is firewalled.
+    public static func expandSeedUris(_ raw: String) -> [String] {
+        let tokens = raw
+            .components(separatedBy: CharacterSet(charactersIn: ", \t\n\r"))
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        var ordered: [String] = []
+        for uri in tokens {
+            if uri.hasPrefix("tcp://") {
+                let udpUri = "udp://" + uri.dropFirst("tcp://".count)
+                if !ordered.contains(udpUri) { ordered.append(udpUri) }
+                if !ordered.contains(uri) { ordered.append(uri) }
+            } else if uri.hasPrefix("udp://") {
+                if !ordered.contains(uri) { ordered.append(uri) }
+                let tcpUri = "tcp://" + uri.dropFirst("udp://".count)
+                if !ordered.contains(tcpUri) { ordered.append(tcpUri) }
+            } else if !ordered.contains(uri) {
+                ordered.append(uri)
+            }
+        }
+        return ordered
+    }
+
+    public static func writeRuntimeToml(for session: AccountSession) throws -> URL {
+        guard let mesh = session.mesh else {
+            throw ControlPlaneError.serverError("Missing mesh credentials in account session")
+        }
+        try FileManager.default.createDirectory(at: meshDirURL, withIntermediateDirectories: true)
+        let lanIPs = discoverLanIPs(excludingSubnetOf: session.virtualCidr)
+        let port = max(1024, min(65535, mesh.listenPort))
+        let mapped = lanIPs.map { "\"udp://\($0):\(port)\"" }.joined(separator: ", ")
+        let peerBlocks = expandSeedUris(mesh.seedUri)
+            .map { "[[peer]]\nuri = \"\($0)\"" }
+            .joined(separator: "\n\n")
+        let toml = """
+        hostname = "\(session.deviceName.isEmpty ? "mac" : session.deviceName)"
+        ipv4 = "\(session.virtualCidr)"
+        listeners = ["udp://0.0.0.0:\(port)", "tcp://0.0.0.0:\(port)"]
+        mapped_listeners = [\(mapped)]
+
+        [network_identity]
+        network_name = "\(mesh.networkName)"
+        network_secret = "\(mesh.networkSecret)"
+
+        \(peerBlocks)
+
+        [flags]
+        default_protocol = "udp"
+        multi_thread = true
+        latency_first = true
+        """
+        try toml.write(to: runtimeTomlURL, atomically: true, encoding: .utf8)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: runtimeTomlURL.path)
+        return runtimeTomlURL
+    }
+
+    public static func readPublicMoonlightIdentity() -> (uniqueId: String, certPem: String)? {
+        let mlDir = appSupportDir.appendingPathComponent("moonlight", isDirectory: true)
+        let uidURL = mlDir.appendingPathComponent("uniqueid.txt")
+        let certURL = mlDir.appendingPathComponent("client.crt")
+        guard let uid = try? String(contentsOf: uidURL, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
+              let cert = try? String(contentsOf: certURL, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
+              !uid.isEmpty, cert.contains("BEGIN CERTIFICATE") else {
+            return nil
+        }
+        return (uid, cert)
+    }
+
+    /// Launches or restarts macOS built-in EasyTier via standard macOS Administrator prompt
+    /// (required once by macOS to open a utun interface and manage /Library/LaunchDaemons/io.nodedeck.mesh.plist).
+    public static func installAndStartSystemMeshDaemon(tomlURL: URL) async throws {
+        guard let etBin = resolveEasyTierBinary() else {
+            throw ControlPlaneError.serverError("Built-in easytier-core binary not found")
+        }
+        let plistPath = "/Library/LaunchDaemons/io.nodedeck.mesh.plist"
+        let confDst = "/etc/nodedeck/easytier-runtime.toml"
+        let escapedSrc = tomlURL.path.replacingOccurrences(of: "'", with: "'\\''")
+        let escapedBin = etBin.replacingOccurrences(of: "'", with: "'\\''")
+        let shellCmd = """
+        mkdir -p /etc/nodedeck && chmod 700 /etc/nodedeck && \
+        cp '\(escapedSrc)' '\(confDst)' && chmod 600 '\(confDst)' && \
+        launchctl bootout system /Library/LaunchDaemons/io.sshdeck.easytier.plist 2>/dev/null || true; \
+        launchctl bootout system '\(plistPath)' 2>/dev/null || true; \
+        cat > '\(plistPath)' <<'PLIST'
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+          <key>Label</key><string>io.nodedeck.mesh</string>
+          <key>ProgramArguments</key>
+          <array>
+            <string>\(escapedBin)</string>
+            <string>-c</string>
+            <string>\(confDst)</string>
+          </array>
+          <key>RunAtLoad</key><true/>
+          <key>KeepAlive</key><true/>
+        </dict>
+        </plist>
+        PLIST
+        chmod 644 '\(plistPath)' && launchctl bootstrap system '\(plistPath)'
+        """
+        let appleScript = "do shell script \"\(shellCmd.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\""))\" with administrator privileges"
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        proc.arguments = ["-e", appleScript]
+        let errPipe = Pipe()
+        proc.standardError = errPipe
+        try proc.run()
+        proc.waitUntilExit()
+        if proc.terminationStatus != 0 {
+            let errText = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "Authorization cancelled"
+            throw ControlPlaneError.serverError(errText.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+    }
+}

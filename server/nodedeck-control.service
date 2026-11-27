@@ -1,0 +1,16 @@
+[Unit]
+Description=NodeDeck Self-Hosted Control Plane API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/nodedeck-control/env
+ExecStart=/usr/bin/python3 /opt/nodedeck-control/nodedeck_control.py
+Restart=always
+RestartSec=3
+User=root
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

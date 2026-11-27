@@ -71,6 +71,18 @@ struct SidebarView: View {
             Spacer(minLength: 4)
 
             Button {
+                store.isShowingAccountSheet = true
+            } label: {
+                Image(systemName: store.accountSession.isLoggedIn ? "person.crop.circle.badge.checkmark" : "person.crop.circle")
+                    .foregroundStyle(store.accountSession.isLoggedIn ? AppTheme.accent : .secondary)
+                    .frame(width: 24, height: 24)
+            }
+            .buttonStyle(.borderless)
+            .help(store.accountSession.isLoggedIn
+                ? l10n.t("账号: \(store.accountSession.username) (\(store.accountSession.virtualIp))", "Account: \(store.accountSession.username) (\(store.accountSession.virtualIp))")
+                : l10n.t("账号登录与内置组网", "Sign In & Built-in Mesh"))
+
+            Button {
                 store.presentAddHost()
             } label: {
                 Image(systemName: "plus")

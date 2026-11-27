@@ -79,6 +79,12 @@ final class HostMonitor: ObservableObject {
     @Published var hostPendingDeletion: SSHHost?
     @Published var isShowingArchitectureGuide = false
 
+    // Unified Account & Built-in Mesh state
+    @Published var accountSession: AccountSession = AccountSession()
+    @Published var accountDevices: [ControlPlaneDevice] = []
+    @Published var isShowingAccountSheet = false
+    let controlPlaneClient = ControlPlaneClient()
+
     @Published var feedback: ActionFeedback?
 
     @Published var refreshInterval: Double {
@@ -215,6 +221,7 @@ final class HostMonitor: ObservableObject {
         sunshineHostConfigs = SunshineClient.loadSavedHosts()
         hostProfiles = LinuxHostProfileManager.loadProfiles()
         refreshLocalSunshineHostState()
+        loadAccountStateFromDisk()
 
         Task {
             await ensureAutoStartPortForwards()

@@ -4,3 +4,8 @@ dist/
 .swiftpm/
 artifacts/*.zip
 artifacts/*.deb
+artifacts/*.apk
+android/.gradle/
+android/local.properties
+android/**/build/
+android/**/.cxx/

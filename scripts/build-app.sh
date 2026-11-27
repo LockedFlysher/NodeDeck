@@ -88,6 +88,14 @@ elif [[ -x "$HOST_BIN" ]]; then
     fi
 fi
 
+# Embed built-in EasyTier core binary if present
+EASYTIER_BIN="${EASYTIER_BIN:-/usr/local/bin/easytier-core}"
+if [[ -x "$EASYTIER_BIN" ]]; then
+    mkdir -p "$APP_PATH/Contents/Helpers"
+    cp "$EASYTIER_BIN" "$APP_PATH/Contents/Helpers/easytier-core"
+    chmod 0755 "$APP_PATH/Contents/Helpers/easytier-core"
+fi
+
 codesign --force --deep --sign - "$APP_PATH"
 
 ARTIFACT_DIR="$ROOT/artifacts"
