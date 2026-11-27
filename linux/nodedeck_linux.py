@@ -20,8 +20,9 @@ from pathlib import Path
 
 import gi
 
+gi.require_version("Gdk", "3.0")
 gi.require_version("Gtk", "3.0")
-from gi.repository import GLib, Gtk
+from gi.repository import Gdk, GLib, Gtk
 
 SSH_CONFIG = Path.home() / ".ssh" / "config"
 CONF_DIR = Path.home() / ".config" / "nodedeck"
@@ -38,13 +39,89 @@ ACCOUNT_FILE = CONF_DIR / "account.json"
 
 
 def load_account_session() -> dict:
-    for p in (Path("/etc/nodedeck/account.json"), ACCOUNT_FILE):
+    for p in (ACCOUNT_FILE, Path("/etc/nodedeck/account.json")):
         try:
             if p.exists():
-                return json.loads(p.read_text(encoding="utf-8"))
+                data = json.loads(p.read_text(encoding="utf-8"))
+                if isinstance(data, dict) and data.get("token"):
+                    return data
         except Exception:
             pass
     return {}
+
+
+def save_account_session(data: dict) -> None:
+    try:
+        CONF_DIR.mkdir(parents=True, exist_ok=True)
+        ACCOUNT_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        os.chmod(ACCOUNT_FILE, 0o600)
+    except Exception:
+        pass
+
+
+def fetch_live_account_state(acct: dict) -> dict | None:
+    token = str(acct.get("token") or "").strip()
+    server_url = str(acct.get("server_url") or DEFAULT_CONTROL_SERVER).rstrip("/")
+    if not token or not server_url:
+        return None
+    req = urllib.request.Request(
+        f"{server_url}/api/v1/state",
+        headers={"Authorization": f"Bearer {token}"},
+        method="GET",
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        fresh = json.loads(resp.read().decode("utf-8"))
+    fresh["token"] = token
+    fresh["server_url"] = server_url
+    if acct.get("ssh_user"):
+        fresh["ssh_user"] = acct["ssh_user"]
+    save_account_session(fresh)
+    return fresh
+
+
+def upload_linux_client_cert(acct: dict) -> bool:
+    token = str(acct.get("token") or "").strip()
+    server_url = str(acct.get("server_url") or DEFAULT_CONTROL_SERVER).rstrip("/")
+    if not token or not server_url:
+        return False
+    try:
+        cert_path, _key_path, uid = ensure_client_cert()
+        cert_pem = cert_path.read_text(encoding="utf-8").strip()
+        if "BEGIN CERTIFICATE" not in cert_pem or not uid:
+            return False
+        dev_name = str(acct.get("device", {}).get("device_name") or socket.gethostname())
+        payload = json.dumps({
+            "device_name": dev_name,
+            "unique_id": uid,
+            "cert_pem": cert_pem,
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            f"{server_url}/api/v1/certs/register",
+            data=payload,
+            headers={
+                "Content-Type": "application/json; charset=utf-8",
+                "Authorization": f"Bearer {token}",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return 200 <= resp.status < 300
+    except Exception:
+        return False
+
+
+def load_sunshine_hosts_dict() -> dict:
+    raw = load_json(SUNSHINE_FILE, {})
+    if isinstance(raw, dict):
+        return raw
+    # Migrate legacy list format back to alias-keyed dict
+    migrated = {}
+    if isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, dict) and item.get("hostAlias"):
+                migrated[item["hostAlias"]] = item
+        save_json(SUNSHINE_FILE, migrated)
+    return migrated
 
 
 def detect_default_lang() -> str:
@@ -332,6 +409,24 @@ def save_json(path, data):
 
 METRICS_SCRIPT = r"""
 printf 'ND_BEGIN\n'
+if [ "$(uname -s 2>/dev/null)" = "Darwin" ]; then
+  printf 'OS=macOS %s\n' "$(sw_vers -productVersion 2>/dev/null || printf Darwin)"
+  printf 'KERNEL=%s\n' "$(uname -sr 2>/dev/null)"
+  printf 'CORES=%s\n' "$(sysctl -n hw.ncpu 2>/dev/null || echo 0)"
+  cpu_u=$(top -l 1 -n 0 2>/dev/null | awk -F'[:%, ]+' '/CPU usage/ {printf "%.1f", $3 + $5; exit}')
+  printf 'CPU=%s\n' "${cpu_u:-0.0}"
+  mt_b=$(sysctl -n hw.memsize 2>/dev/null || echo 0)
+  pg_sz=$(pagesize 2>/dev/null || echo 16384)
+  ma_b=$(vm_stat 2>/dev/null | awk -v ps="$pg_sz" '/Pages free:|Pages inactive:|Pages speculative:/ {gsub(/\./,"",$NF); sum+=$NF} END {printf "%.0f", sum*ps}')
+  mt_mb=$(( ${mt_b:-0} / 1048576 ))
+  ma_mb=$(( ${ma_b:-0} / 1048576 ))
+  printf 'MEM_TOTAL_MB=%s\n' "$mt_mb"
+  printf 'MEM_USED_MB=%s\n' "$(( mt_mb > ma_mb ? mt_mb - ma_mb : 0 ))"
+  df -Pm / 2>/dev/null | awk 'NR==2 {printf "DISK_USED_GB=%.1f\nDISK_TOTAL_GB=%.1f\n", $3/1024, $2/1024}'
+  ps -eo pcpu=,pmem=,comm= -r 2>/dev/null | head -n 5 | awk 'NF >= 3 { cpu=$1; mem=$2; $1=""; $2=""; sub(/^[[:space:]]+/, ""); printf "PROC=%s|%s|%s\n", $0, cpu, mem }'
+  printf 'ND_END\n'
+  exit 0
+fi
 printf 'OS=%s\n' "$(. /etc/os-release 2>/dev/null; printf '%s' "${PRETTY_NAME:-$(uname -s)}")"
 printf 'KERNEL=%s\n' "$(uname -sr 2>/dev/null)"
 printf 'CORES=%s\n' "$(nproc 2>/dev/null || echo 0)"
@@ -484,11 +579,15 @@ class NodeDeckWindow(Gtk.Window):
                 pass
         self.hosts = []
         self.selected_host = None
+        self._reloading_hosts = False
         self.forwards = load_json(FORWARDS_FILE, [])
         self.forward_procs = {}
-        self.sunshine_hosts = load_json(SUNSHINE_FILE, {})
+        self.sunshine_hosts = load_sunshine_hosts_dict()
         self.host_profiles = load_json(PROFILES_FILE, {})
         self.settings = load_json(SETTINGS_FILE, {})
+        self.pinned_aliases = set(self.settings.get("pinned_aliases", []))
+        self.search_query = ""
+        self.filter_mode = "all"
         self.lang = self.settings.get("language") or detect_default_lang()
         self.metrics_cache = {}
         saved_res = self.settings.get("stream_resolution", "1920x1080")
@@ -520,7 +619,7 @@ class NodeDeckWindow(Gtk.Window):
         self.hb.pack_start(self.btn_account)
 
         self.btn_refresh = Gtk.Button()
-        self.btn_refresh.connect("clicked", lambda *_: (self._update_chrome_labels(), self.reload_hosts()))
+        self.btn_refresh.connect("clicked", self.on_refresh_all)
         self.hb.pack_end(self.btn_refresh)
 
         self.btn_lang = Gtk.Button()
@@ -534,15 +633,42 @@ class NodeDeckWindow(Gtk.Window):
         self._update_chrome_labels()
 
         paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
-        paned.set_position(250)
+        paned.set_position(290)
         self.add(paned)
 
-        # Left sidebar
+        # Left sidebar with search, filter pills, and right-click context menu
+        sidebar_vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        sidebar_vbox.set_margin_top(8)
+        sidebar_vbox.set_margin_bottom(8)
+        sidebar_vbox.set_margin_start(8)
+        sidebar_vbox.set_margin_end(8)
+
+        self.search_entry = Gtk.SearchEntry()
+        self.search_entry.set_placeholder_text(self.t("搜索别名、IP 或用户…", "Search alias, IP or user…"))
+        self.search_entry.connect("search-changed", self.on_search_changed)
+        sidebar_vbox.pack_start(self.search_entry, False, False, 0)
+
+        filter_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        self.filter_buttons = {}
+        for key, zh_lbl, en_lbl in [
+            ("all", "全部", "All"),
+            ("online", "在线", "Online"),
+            ("remote", "远控", "Remote"),
+        ]:
+            fb = Gtk.ToggleButton(label=self.t(zh_lbl, en_lbl))
+            fb.set_active(key == "all")
+            fb.connect("toggled", self.on_filter_toggled, key)
+            filter_box.pack_start(fb, True, True, 0)
+            self.filter_buttons[key] = fb
+        sidebar_vbox.pack_start(filter_box, False, False, 0)
+
         scroll = Gtk.ScrolledWindow()
         self.listbox = Gtk.ListBox()
         self.listbox.connect("row-selected", self.on_select_host)
+        self.listbox.connect("button-press-event", self.on_listbox_button_press)
         scroll.add(self.listbox)
-        paned.pack1(scroll, False, False)
+        sidebar_vbox.pack_start(scroll, True, True, 0)
+        paned.pack1(sidebar_vbox, False, False)
 
         # Right detail pane (scrollable)
         detail_scroll = Gtk.ScrolledWindow()
@@ -557,6 +683,8 @@ class NodeDeckWindow(Gtk.Window):
         self.status_label = Gtk.Label(label="")
         self.status_label.set_xalign(0)
         self.reload_hosts()
+        self.sync_account_async(silent=True)
+        self.refresh_all_metrics_async()
 
     def t(self, zh: str, en: str) -> str:
         return zh if self.lang == "zh" else en
@@ -645,8 +773,7 @@ class NodeDeckWindow(Gtk.Window):
                     pass
                 self._update_chrome_labels()
             elif resp == Gtk.ResponseType.APPLY:
-                self._sync_account_devices_to_linux(acct)
-                self.reload_hosts()
+                self.sync_account_async(silent=False)
             return
 
         # Login / Register form
@@ -704,42 +831,100 @@ class NodeDeckWindow(Gtk.Window):
             cmd += ["--invite", inv]
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
         if res.returncode == 0:
-            new_acct = load_account_session()
-            self._sync_account_devices_to_linux(new_acct)
+            self.sync_account_async(silent=False)
             self._update_chrome_labels()
-            self.reload_hosts()
-            self.status_label.set_text(self.t(f"已登录 {u} 并同步设备", f"Signed in as {u}"))
+            self.status_label.set_text(self.t(f"已登录 {u}，正在同步账号设备…", f"Signed in as {u}, syncing devices…"))
         else:
             err = (res.stderr or res.stdout).strip()
             self.status_label.set_text(self.t(f"认证失败: {err}", f"Auth failed: {err}"))
 
-    def _sync_account_devices_to_linux(self, acct: dict):
-        if not acct:
+    def on_refresh_all(self, _btn=None):
+        self._update_chrome_labels()
+        self.reload_hosts()
+        self.sync_account_async(silent=False)
+        self.refresh_all_metrics_async()
+
+    def sync_account_async(self, silent: bool = False):
+        acct = load_account_session()
+        if not acct.get("token"):
             return
+
+        def worker():
+            try:
+                fresh = fetch_live_account_state(acct) or acct
+                upload_linux_client_cert(fresh)
+                added = self._sync_account_devices_to_linux(fresh)
+                GLib.idle_add(self._on_account_synced, fresh, added, silent, None)
+            except Exception as exc:
+                GLib.idle_add(self._on_account_synced, acct, 0, silent, str(exc))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_account_synced(self, acct: dict, synced_count: int, silent: bool, err: str | None):
+        self._update_chrome_labels()
+        self.reload_hosts()
+        if err:
+            if not silent:
+                self.status_label.set_text(self.t(f"账号同步失败: {err}", f"Account sync failed: {err}"))
+        else:
+            if synced_count > 0:
+                self.refresh_all_metrics_async()
+            if not silent:
+                devs_total = len(acct.get("devices", []))
+                self.status_label.set_text(
+                    self.t(
+                        f"账号同步完成：共 {devs_total} 台设备，已同步 {synced_count} 台主机节点",
+                        f"Synced {devs_total} account device(s), {synced_count} host(s) ready",
+                    )
+                )
+
+    def _sync_account_devices_to_linux(self, acct: dict) -> int:
+        if not acct:
+            return 0
         self_id = acct.get("device", {}).get("device_id")
-        sunshine_hosts = load_json(SUNSHINE_FILE, [])
+        self_ip = acct.get("device", {}).get("virtual_ip")
+        sunshine_hosts = load_sunshine_hosts_dict()
+        existing_ssh = parse_ssh_hosts()
+        synced_count = 0
+
         for dev in acct.get("devices", []):
-            if dev.get("device_id") == self_id:
+            dev_id = dev.get("device_id")
+            ip = str(dev.get("virtual_ip") or "").strip()
+            alias = str(dev.get("device_name") or "").strip()
+            if not ip or not alias or dev_id == self_id or ip == self_ip:
                 continue
-            if dev.get("role") not in ("host", "both") or not dev.get("virtual_ip"):
+            if dev.get("role") not in ("host", "both"):
                 continue
+
+            ssh_user = str(dev.get("ssh_user") or os.getenv("USER") or "root").strip()
+            ssh_port = str(int(dev.get("ssh_port") or 22))
+            match_host = next(
+                (h for h in existing_ssh if h["alias"].lower() == alias.lower() or h["hostname"] == ip),
+                None,
+            )
+            if match_host:
+                target_alias = match_host["alias"]
+                if match_host["hostname"] != ip or (dev.get("ssh_user") and match_host["user"] != ssh_user) or str(match_host["port"]) != ssh_port:
+                    update_ssh_host(target_alias, target_alias, ip, ssh_user, ssh_port)
+            else:
+                target_alias = alias
+                append_ssh_host(target_alias, ip, ssh_user, ssh_port)
+                existing_ssh.append({"alias": target_alias, "hostname": ip, "user": ssh_user, "port": ssh_port})
+            synced_count += 1
+
             if dev.get("sunshine_enabled"):
-                alias = dev["device_name"]
-                ip = dev["virtual_ip"]
-                existing = next((s for s in sunshine_hosts if s.get("hostAlias") == alias or s.get("address") == ip), None)
-                entry = {
-                    "hostAlias": alias,
+                sunshine_hosts[target_alias] = {
+                    "hostAlias": target_alias,
                     "address": ip,
                     "httpPort": int(dev.get("sunshine_http_port") or 47989),
                     "httpsPort": int(dev.get("sunshine_https_port") or 47984),
                     "serverName": alias,
                     "isPaired": True,
                 }
-                if existing:
-                    existing.update(entry)
-                else:
-                    sunshine_hosts.append(entry)
+
         save_json(SUNSHINE_FILE, sunshine_hosts)
+        self.sunshine_hosts = sunshine_hosts
+        return synced_count
 
     def on_toggle_local_host(self, _btn):
         host_bin = resolve_host_bin()
@@ -836,37 +1021,209 @@ class NodeDeckWindow(Gtk.Window):
         dlg.run()
         dlg.destroy()
 
+    def on_search_changed(self, entry):
+        self.search_query = entry.get_text().strip().lower()
+        self.reload_hosts()
+
+    def on_filter_toggled(self, btn, key):
+        if not btn.get_active():
+            if self.filter_mode == key:
+                btn.set_active(True)
+            return
+        self.filter_mode = key
+        for k, other in self.filter_buttons.items():
+            if k != key and other.get_active():
+                other.set_active(False)
+        self.reload_hosts()
+
+    def toggle_pin_host(self, alias: str):
+        if alias in self.pinned_aliases:
+            self.pinned_aliases.remove(alias)
+        else:
+            self.pinned_aliases.add(alias)
+        self.settings["pinned_aliases"] = sorted(self.pinned_aliases)
+        save_json(SETTINGS_FILE, self.settings)
+        self.reload_hosts()
+
+    def confirm_and_delete_host(self, host: dict):
+        alias = host["alias"]
+        dlg = Gtk.MessageDialog(
+            transient_for=self,
+            flags=0,
+            message_type=Gtk.MessageType.WARNING,
+            buttons=Gtk.ButtonsType.OK_CANCEL,
+            text=self.t(f"确定删除设备「{alias}」吗？", f"Delete host '{alias}'?"),
+        )
+        dlg.format_secondary_text(
+            self.t(
+                f"将从 ~/.ssh/config 与远程桌面配置中移除 {host['user']}@{host['hostname']}。",
+                f"This removes {host['user']}@{host['hostname']} from ~/.ssh/config and Sunshine config.",
+            )
+        )
+        resp = dlg.run()
+        dlg.destroy()
+        if resp != Gtk.ResponseType.OK:
+            return
+        delete_ssh_host(alias)
+        if alias in self.sunshine_hosts:
+            self.sunshine_hosts.pop(alias, None)
+            save_json(SUNSHINE_FILE, self.sunshine_hosts)
+        if alias in self.host_profiles:
+            self.host_profiles.pop(alias, None)
+            save_json(PROFILES_FILE, self.host_profiles)
+        if alias in self.pinned_aliases:
+            self.pinned_aliases.discard(alias)
+            self.settings["pinned_aliases"] = sorted(self.pinned_aliases)
+            save_json(SETTINGS_FILE, self.settings)
+        self.metrics_cache.pop(alias, None)
+        if self.selected_host and self.selected_host["alias"] == alias:
+            self.selected_host = None
+        self.reload_hosts()
+        self.status_label.set_text(self.t(f"已删除设备 {alias}", f"Deleted host {alias}"))
+
+    def on_listbox_button_press(self, listbox, event):
+        if event.button != 3:
+            return False
+        row = listbox.get_row_at_y(int(event.y))
+        if row is None or not hasattr(row, "host_data"):
+            return False
+        listbox.select_row(row)
+        h = row.host_data
+        alias = h["alias"]
+        menu = Gtk.Menu()
+
+        def add_item(label, cb):
+            mi = Gtk.MenuItem(label=label)
+            mi.connect("activate", lambda *_: cb())
+            menu.append(mi)
+
+        add_item(self.t("打开终端", "Open Terminal"), lambda: subprocess.Popen(["x-terminal-emulator", "-e", "ssh", alias]))
+        saved = self.sunshine_hosts.get(alias)
+        if saved:
+            add_item(self.t("启动远程桌面", "Launch Remote Desktop"), lambda: self.launch_stream(saved))
+        add_item("VS Code Remote SSH", lambda: self.open_vscode_remote(h))
+        add_item(self.t("刷新状态", "Refresh Metrics"), lambda: self.refresh_metrics_async(alias))
+        menu.append(Gtk.SeparatorMenuItem())
+        pin_lbl = self.t("取消置顶", "Unpin") if alias in self.pinned_aliases else self.t("置顶设备", "Pin to Top")
+        add_item(pin_lbl, lambda: self.toggle_pin_host(alias))
+        add_item(
+            self.t("复制 SSH 命令", "Copy SSH Command"),
+            lambda: Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text(f"ssh {alias}", -1),
+        )
+        add_item(self.t("编辑设备", "Edit Host"), lambda: self.on_edit_device(h))
+        menu.append(Gtk.SeparatorMenuItem())
+        add_item(self.t("删除设备", "Delete Host"), lambda: self.confirm_and_delete_host(h))
+
+        menu.show_all()
+        menu.popup_at_pointer(event)
+        return True
+
+    def open_vscode_remote(self, host: dict):
+        code_bin = None
+        for cand in ("code", "code-insiders", "codium"):
+            if subprocess.run(["which", cand], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+                code_bin = cand
+                break
+        if not code_bin:
+            self.status_label.set_text(self.t("未检测到 VS Code (code 命令)", "VS Code CLI not found"))
+            return
+        subprocess.Popen([code_bin, "--remote", f"ssh-remote+{host['alias']}"])
+        self.status_label.set_text(self.t(f"正在通过 VS Code 打开 {host['alias']}…", f"Opening {host['alias']} in VS Code…"))
+
+    def refresh_all_metrics_async(self):
+        for h in list(self.hosts):
+            self.refresh_metrics_async(h["alias"])
+
     def reload_hosts(self):
         prev_alias = self.selected_host["alias"] if self.selected_host else None
-        self.hosts = parse_ssh_hosts()
-        for child in self.listbox.get_children():
-            self.listbox.remove(child)
-        target_idx = 0
-        for idx, h in enumerate(self.hosts):
-            if h["alias"] == prev_alias:
-                target_idx = idx
-            row = Gtk.ListBoxRow()
-            row.host_data = h
-            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-            box.set_margin_top(6)
-            box.set_margin_bottom(6)
-            box.set_margin_start(10)
-            box.set_margin_end(10)
-            lbl1 = Gtk.Label(label=h["alias"])
-            lbl1.set_xalign(0)
-            lbl2 = Gtk.Label(label=f'{h["user"]}@{h["hostname"]}:{h["port"]}')
-            lbl2.set_xalign(0)
-            lbl2.get_style_context().add_class("dim-label")
-            box.pack_start(lbl1, False, False, 0)
-            box.pack_start(lbl2, False, False, 0)
-            row.add(box)
-            self.listbox.add(row)
-        self.listbox.show_all()
-        if self.hosts:
-            self.listbox.select_row(self.listbox.get_row_at_index(target_idx))
+        all_hosts = parse_ssh_hosts()
+        all_hosts.sort(key=lambda h: (0 if h["alias"] in self.pinned_aliases else 1, h["alias"].lower()))
+        self.hosts = all_hosts
+
+        filtered = []
+        for h in all_hosts:
+            alias = h["alias"]
+            if self.search_query:
+                hay = f"{alias} {h['hostname']} {h['user']}".lower()
+                if self.search_query not in hay:
+                    continue
+            if self.filter_mode == "online":
+                m = self.metrics_cache.get(alias)
+                if not m or "error" in m:
+                    continue
+            elif self.filter_mode == "remote":
+                if alias not in self.sunshine_hosts:
+                    continue
+            filtered.append(h)
+
+        self._reloading_hosts = True
+        try:
+            for child in self.listbox.get_children():
+                self.listbox.remove(child)
+            target_idx = 0
+            for idx, h in enumerate(filtered):
+                alias = h["alias"]
+                if alias == prev_alias:
+                    target_idx = idx
+                row = Gtk.ListBoxRow()
+                row.host_data = h
+                box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+                box.set_margin_top(7)
+                box.set_margin_bottom(7)
+                box.set_margin_start(10)
+                box.set_margin_end(10)
+
+                top_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+                m = self.metrics_cache.get(alias)
+                if not m:
+                    dot = '<span foreground="#8b949e">●</span>'
+                    rtt_txt = ""
+                elif "error" in m:
+                    dot = '<span foreground="#f85149">●</span>'
+                    rtt_txt = ""
+                else:
+                    dot = '<span foreground="#3fb950">●</span>'
+                    rtt_txt = f'<span foreground="#3fb950" size="small">{m.get("RTT_MS", "?")} ms</span>'
+                pin_icon = "📌 " if alias in self.pinned_aliases else ""
+                lbl1 = Gtk.Label()
+                lbl1.set_markup(f"{dot} <b>{GLib.markup_escape_text(pin_icon + alias)}</b>")
+                lbl1.set_xalign(0)
+                top_row.pack_start(lbl1, True, True, 0)
+                if rtt_txt:
+                    lbl_rtt = Gtk.Label()
+                    lbl_rtt.set_markup(rtt_txt)
+                    top_row.pack_end(lbl_rtt, False, False, 0)
+
+                badges = []
+                if alias in self.sunshine_hosts:
+                    badges.append("Remote")
+                if m and "error" not in m and m.get("GPUS"):
+                    badges.append("GPU")
+                badge_str = f" · {' / '.join(badges)}" if badges else ""
+                lbl2 = Gtk.Label(label=f'{h["user"]}@{h["hostname"]}:{h["port"]}{badge_str}')
+                lbl2.set_xalign(0)
+                lbl2.set_ellipsize(3)
+                lbl2.get_style_context().add_class("dim-label")
+                box.pack_start(top_row, False, False, 0)
+                box.pack_start(lbl2, False, False, 0)
+                row.add(box)
+                self.listbox.add(row)
+            self.listbox.show_all()
+            if filtered:
+                row_to_sel = self.listbox.get_row_at_index(target_idx)
+                self.listbox.select_row(row_to_sel)
+                self.selected_host = filtered[target_idx]
+            else:
+                self.selected_host = None
+                for child in self.detail_box.get_children():
+                    self.detail_box.remove(child)
+        finally:
+            self._reloading_hosts = False
+        if self.selected_host:
+            self.render_detail()
 
     def on_select_host(self, _lb, row):
-        if row is None:
+        if self._reloading_hosts or row is None:
             return
         self.selected_host = row.host_data
         self.render_detail()
@@ -898,8 +1255,8 @@ class NodeDeckWindow(Gtk.Window):
             self.status_label.set_text(f"{alias}: {data['error']}")
         else:
             self.status_label.set_text(f"{alias} online · RTT {data.get('RTT_MS', '?')} ms")
-        if self.selected_host and self.selected_host["alias"] == alias:
-            self.render_detail()
+        # Refresh sidebar status dot & RTT badge in-place without losing selection
+        self.reload_hosts()
 
     def render_detail(self):
         for child in self.detail_box.get_children():
@@ -929,12 +1286,16 @@ class NodeDeckWindow(Gtk.Window):
             btn_top_stream.connect("clicked", lambda *_: self.launch_stream(saved))
             top.pack_start(btn_top_stream, False, False, 0)
 
+        btn_vscode = Gtk.Button(label="VS Code")
+        btn_vscode.connect("clicked", lambda *_: self.open_vscode_remote(h))
+        top.pack_start(btn_vscode, False, False, 0)
+
         btn_edit = Gtk.Button(label=self.t("编辑", "Edit"))
         btn_edit.connect("clicked", lambda *_: self.on_edit_device(h))
         top.pack_start(btn_edit, False, False, 0)
 
         btn_del = Gtk.Button(label=self.t("删除", "Delete"))
-        btn_del.connect("clicked", lambda *_: (delete_ssh_host(h["alias"]), self.reload_hosts()))
+        btn_del.connect("clicked", lambda *_: self.confirm_and_delete_host(h))
         top.pack_start(btn_del, False, False, 0)
         self.detail_box.pack_start(top, False, False, 0)
 
