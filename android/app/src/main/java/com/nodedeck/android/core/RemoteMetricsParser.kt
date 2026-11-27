@@ -5,6 +5,28 @@ object RemoteMetricsParser {
 printf 'NODEDECK_BEGIN\n'
 t_start=${'$'}(awk '{print ${'$'}1}' /proc/uptime 2>/dev/null)
 printf 'HOSTNAME=%s\n' "${'$'}(hostname 2>/dev/null)"
+if [ "${'$'}(uname -s 2>/dev/null)" = "Darwin" ]; then
+  printf 'OS=macOS %s\n' "${'$'}(sw_vers -productVersion 2>/dev/null || printf Darwin)"
+  printf 'CPU_MODEL=%s\n' "${'$'}(sysctl -n machdep.cpu.brand_string 2>/dev/null || printf 'Apple Silicon')"
+  printf 'CPU_CORES=%s\n' "${'$'}(sysctl -n hw.ncpu 2>/dev/null || printf 0)"
+  cpu_u=${'$'}(top -l 1 -n 0 2>/dev/null | awk -F'[:%, ]+' '/CPU usage/ {printf "%.1f", ${'$'}3 + ${'$'}5; exit}')
+  printf 'CPU_USAGE=%s\n' "${'$'}{cpu_u:-0.0}"
+  set -- ${'$'}(sysctl -n vm.loadavg 2>/dev/null | tr -d '{}')
+  printf 'LOAD1=%s\nLOAD5=%s\nLOAD15=%s\n' "${'$'}{1:-0}" "${'$'}{2:-0}" "${'$'}{3:-0}"
+  bt=${'$'}(sysctl -n kern.boottime 2>/dev/null | awk -F'[=, ]+' '{for(i=1;i<=NF;i++) if(${'$'}i=="sec") {print ${'$'}(i+1); exit}}')
+  now_s=${'$'}(date +%s 2>/dev/null)
+  if [ -n "${'$'}bt" ] && [ -n "${'$'}now_s" ]; then printf 'UPTIME_SECONDS=%s\n' "${'$'}(( now_s - bt ))"; fi
+  mem_total_b=${'$'}(sysctl -n hw.memsize 2>/dev/null || printf 0)
+  pg_sz=${'$'}(pagesize 2>/dev/null || printf 16384)
+  mem_avail_b=${'$'}(vm_stat 2>/dev/null | awk -v ps="${'$'}pg_sz" '/Pages free:|Pages inactive:|Pages speculative:/ {gsub(/\./,"",${'$'}NF); sum+=${'$'}NF} END {printf "%.0f", sum*ps}')
+  printf 'MEM_TOTAL=%s\n' "${'$'}{mem_total_b:-0}"
+  printf 'MEM_AVAILABLE=%s\n' "${'$'}{mem_avail_b:-0}"
+  printf 'SWAP_TOTAL=0\nSWAP_FREE=0\n'
+  df -Pk / 2>/dev/null | awk 'NR==2 {printf "DISK_TOTAL=%d\nDISK_USED=%d\nDISK_AVAILABLE=%d\n", ${'$'}2*1024, ${'$'}3*1024, ${'$'}4*1024}'
+  ps -eo pcpu=,pmem=,comm= -r 2>/dev/null | head -n 5 | awk 'NF >= 3 { cpu=${'$'}1; mem=${'$'}2; ${'$'}1=""; ${'$'}2=""; sub(/^[[:space:]]+/, ""); printf "PROC=%s|%s|%s\n", ${'$'}0, cpu, mem }'
+  printf 'NODEDECK_END\n'
+  exit 0
+fi
 printf 'OS=%s\n' "${'$'}(. /etc/os-release 2>/dev/null; printf '%s' "${'$'}{PRETTY_NAME:-${'$'}{NAME:-${'$'}(uname -s 2>/dev/null || printf Linux)}}")"
 printf 'KERNEL=%s\n' "${'$'}(uname -sr 2>/dev/null)"
 printf 'ARCH=%s\n' "${'$'}(uname -m 2>/dev/null)"

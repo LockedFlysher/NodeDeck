@@ -34,6 +34,51 @@ public enum RemoteMetricsCollector {
         )
     }
 
+    private static func measureTcpRttMs(host: String, port: Int, timeoutMs: Int32 = 2500) -> Double? {
+        guard !host.isEmpty else { return nil }
+        var hints = addrinfo(
+            ai_flags: 0,
+            ai_family: AF_UNSPEC,
+            ai_socktype: SOCK_STREAM,
+            ai_protocol: IPPROTO_TCP,
+            ai_addrlen: 0,
+            ai_canonname: nil,
+            ai_addr: nil,
+            ai_next: nil
+        )
+        var res: UnsafeMutablePointer<addrinfo>?
+        let portStr = String(max(1, min(65535, port)))
+        guard getaddrinfo(host, portStr, &hints, &res) == 0, let addrList = res else {
+            return nil
+        }
+        defer { freeaddrinfo(addrList) }
+
+        let fd = socket(addrList.pointee.ai_family, addrList.pointee.ai_socktype, addrList.pointee.ai_protocol)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+
+        let flags = fcntl(fd, F_GETFL, 0)
+        _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
+
+        let startedAt = Date()
+        let rc = connect(fd, addrList.pointee.ai_addr, addrList.pointee.ai_addrlen)
+        if rc == 0 {
+            return max(1.0, Date().timeIntervalSince(startedAt) * 1000.0)
+        }
+        guard errno == EINPROGRESS else { return nil }
+
+        var pfd = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+        let pr = poll(&pfd, 1, timeoutMs)
+        guard pr > 0 else { return nil }
+
+        var soErr: Int32 = 0
+        var soLen = socklen_t(MemoryLayout<Int32>.size)
+        guard getsockopt(fd, SOL_SOCKET, SO_ERROR, &soErr, &soLen) == 0, soErr == 0 else {
+            return nil
+        }
+        return max(1.0, Date().timeIntervalSince(startedAt) * 1000.0)
+    }
+
     public static func collect(
         host: SSHHost,
         timeout: TimeInterval = 16
@@ -73,8 +118,11 @@ public enum RemoteMetricsCollector {
             }
 
             if let metrics = RemoteMetricsParser.parse(result.stdout) {
+                let warmTcpRtt: Double? = (host.proxyJump == nil)
+                    ? measureTcpRttMs(host: host.hostName, port: host.port)
+                    : nil
                 let scriptMs = metrics.scriptDurationMilliseconds ?? 0
-                let effectiveRTT = max(1, totalElapsedMs - scriptMs)
+                let effectiveRTT = warmTcpRtt ?? max(1, totalElapsedMs - scriptMs)
                 return HostProbeResult(
                     metrics: metrics,
                     latencyMilliseconds: effectiveRTT,

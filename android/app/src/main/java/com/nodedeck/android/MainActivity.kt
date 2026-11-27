@@ -1,5 +1,6 @@
 package com.nodedeck.android
 
+import android.net.VpnService
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -12,6 +13,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import com.nodedeck.android.core.SSHHost
+import com.nodedeck.android.mesh.MeshConnectionState
+import com.nodedeck.android.mesh.MeshRuntimeController
+import com.nodedeck.android.mesh.NodeDeckVpnService
 import com.nodedeck.android.stream.StreamActivity
 import com.nodedeck.android.ui.AccountScreen
 import com.nodedeck.android.ui.ArchitectureGuideDialog
@@ -38,6 +42,14 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        // Auto-resume built-in EasyTier VPN when already logged in and user has previously granted VPN consent
+        if (viewModel.accountSession.value.isLoggedIn &&
+            MeshRuntimeController.snapshot.value.state == MeshConnectionState.STOPPED &&
+            MeshRuntimeController.prepareVpnIntent(this) == null
+        ) {
+            MeshRuntimeController.start(this)
+        }
 
         setContent {
             NodeDeckTheme {

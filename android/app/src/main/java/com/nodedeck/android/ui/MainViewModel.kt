@@ -24,6 +24,7 @@ import com.nodedeck.android.core.StreamResolutionPreset
 import com.nodedeck.android.core.SunshineHostConfig
 import com.nodedeck.android.mesh.MeshConfig
 import com.nodedeck.android.mesh.MeshConfigCodec
+import com.nodedeck.android.mesh.MeshConnectionState
 import com.nodedeck.android.mesh.MeshRuntimeController
 import com.nodedeck.android.mesh.MeshRuntimeSnapshot
 import kotlinx.coroutines.Dispatchers
@@ -100,9 +101,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val refreshSemaphore = Semaphore(4)
     private var autoRefreshJob: Job? = null
     private var accountHeartbeatJob: Job? = null
+    private val meshTriggeredHostIds = mutableSetOf<String>()
 
     init {
         loadFromStore()
+        observeMeshPeersForRefresh()
         if (_hosts.value.isNotEmpty()) {
             refreshAllHosts()
         }
@@ -111,6 +114,32 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             startAccountHeartbeatLoop()
         }
         restartAutoRefreshLoop()
+    }
+
+    private fun observeMeshPeersForRefresh() {
+        viewModelScope.launch {
+            MeshRuntimeController.snapshot.collect { snap ->
+                if (snap.state != MeshConnectionState.CONNECTED) {
+                    meshTriggeredHostIds.clear()
+                    return@collect
+                }
+                val peerIps = snap.peers.mapNotNull { p ->
+                    p.virtualIpv4.takeIf { it.isNotBlank() && it != "—" }
+                }.toSet()
+                if (peerIps.isEmpty()) return@collect
+
+                for (host in _hosts.value) {
+                    if (host.hostName !in peerIps) continue
+                    val current = _snapshots.value[host.id]
+                    val needsRefresh = current == null ||
+                        current.state == HostConnectionState.OFFLINE ||
+                        (current.state == HostConnectionState.ONLINE && (current.latencyMs ?: 0.0) > 500.0)
+                    if (needsRefresh && meshTriggeredHostIds.add(host.id)) {
+                        refreshHost(host.id)
+                    }
+                }
+            }
+        }
     }
 
     private fun loadFromStore() {
@@ -458,6 +487,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun savePrivateKey(name: String, pem: String): String = store.savePrivateKey(name, pem)
     fun listPrivateKeys(): List<String> = store.listPrivateKeys()
 
+    private fun resolveBestLatencyMs(host: SSHHost, measuredRtt: Double): Double {
+        val meshPeerLat = MeshRuntimeController.snapshot.value.peers
+            .firstOrNull { it.virtualIpv4.equals(host.hostName, ignoreCase = true) }
+            ?.latencyMs
+            ?.takeIf { it > 0.5 && it < 5_000.0 }
+        return if (meshPeerLat != null && (measuredRtt > meshPeerLat * 2.5 || measuredRtt > 500.0)) {
+            meshPeerLat
+        } else {
+            measuredRtt
+        }
+    }
+
     fun refreshHost(hostId: String) {
         val host = _hosts.value.firstOrNull { it.id == hostId } ?: return
         viewModelScope.launch {
@@ -468,6 +509,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val (metrics, rtt, err) = refreshSemaphore.withPermit {
                 sshManager.collectMetrics(host, _hosts.value)
             }
+            val displayRtt = resolveBestLatencyMs(host, rtt)
             _snapshots.update { map ->
                 val cur = map[hostId] ?: HostSnapshot(host = host)
                 if (metrics != null) {
@@ -475,7 +517,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         host = host,
                         state = HostConnectionState.ONLINE,
                         metrics = metrics,
-                        latencyMs = rtt,
+                        latencyMs = displayRtt,
                         errorMessage = null,
                         lastUpdatedMs = System.currentTimeMillis()
                     ))
@@ -483,7 +525,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     map + (hostId to cur.copy(
                         host = host,
                         state = HostConnectionState.OFFLINE,
-                        latencyMs = rtt,
+                        latencyMs = displayRtt,
                         errorMessage = err ?: "Offline",
                         lastUpdatedMs = System.currentTimeMillis()
                     ))
@@ -507,6 +549,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         val (metrics, rtt, err) = refreshSemaphore.withPermit {
                             sshManager.collectMetrics(host, _hosts.value)
                         }
+                        val displayRtt = resolveBestLatencyMs(host, rtt)
                         _snapshots.update { map ->
                             val cur = map[host.id] ?: HostSnapshot(host = host)
                             if (metrics != null) {
@@ -514,7 +557,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                     host = host,
                                     state = HostConnectionState.ONLINE,
                                     metrics = metrics,
-                                    latencyMs = rtt,
+                                    latencyMs = displayRtt,
                                     errorMessage = null,
                                     lastUpdatedMs = System.currentTimeMillis()
                                 ))
@@ -522,7 +565,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 map + (host.id to cur.copy(
                                     host = host,
                                     state = HostConnectionState.OFFLINE,
-                                    latencyMs = rtt,
+                                    latencyMs = displayRtt,
                                     errorMessage = err ?: "Offline",
                                     lastUpdatedMs = System.currentTimeMillis()
                                 ))

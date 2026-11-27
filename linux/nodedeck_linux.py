@@ -8,6 +8,7 @@ import os
 import random
 import re
 import secrets
+import socket
 import ssl
 import subprocess
 import threading
@@ -357,7 +358,28 @@ printf 'ND_END\n'
 """
 
 
-def collect_remote_metrics(alias: str):
+def measure_tcp_rtt_ms(host: str, port: int, timeout: float = 2.5) -> int | None:
+    if not host:
+        return None
+    try:
+        infos = socket.getaddrinfo(host, int(port), type=socket.SOCK_STREAM)
+        if not infos:
+            return None
+        af, socktype, proto, _, sa = infos[0]
+        s = socket.socket(af, socktype, proto)
+        s.settimeout(timeout)
+        try:
+            t0 = time.monotonic()
+            s.connect(sa)
+            return max(1, int((time.monotonic() - t0) * 1000))
+        finally:
+            s.close()
+    except Exception:
+        return None
+
+
+def collect_remote_metrics(alias: str, host_name: str = "", port: int = 22, has_proxy: bool = False):
+    tcp_rtt = None if has_proxy else measure_tcp_rtt_ms(host_name, port)
     t0 = time.monotonic()
     res = subprocess.run(
         ssh_mux_base_args(alias, connect_timeout=5) + ["/bin/sh", "-s"],
@@ -366,7 +388,7 @@ def collect_remote_metrics(alias: str):
         stderr=subprocess.PIPE,
         timeout=12,
     )
-    elapsed_ms = max(1, int((time.monotonic() - t0) * 1000) - 200)
+    elapsed_ms = tcp_rtt if tcp_rtt is not None else max(1, int((time.monotonic() - t0) * 1000) - 200)
     if res.returncode != 0:
         err = res.stderr.decode(errors="ignore").strip() or f"SSH exit {res.returncode}"
         return {"error": err}
@@ -854,9 +876,16 @@ class NodeDeckWindow(Gtk.Window):
     def refresh_metrics_async(self, alias: str):
         self.status_label.set_text(f"Probing live metrics for {alias}...")
 
+        host_obj = next((h for h in self.hosts if h.get("alias") == alias), {})
+
         def worker():
             try:
-                data = collect_remote_metrics(alias)
+                data = collect_remote_metrics(
+                    alias,
+                    host_name=str(host_obj.get("hostname") or alias),
+                    port=int(host_obj.get("port") or 22),
+                    has_proxy=bool(host_obj.get("proxyjump")),
+                )
             except Exception as exc:
                 data = {"error": str(exc)}
             self.metrics_cache[alias] = data

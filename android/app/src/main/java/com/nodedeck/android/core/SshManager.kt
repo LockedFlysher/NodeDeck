@@ -12,6 +12,7 @@ import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.InetAddress
+import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.Properties
@@ -203,6 +204,29 @@ class SshManager(private val store: SecureStore) {
         }
     }
 
+    private fun measureTcpRttMs(hostName: String, port: Int, timeoutMs: Int = 2_500): Double? {
+        if (hostName.isBlank()) return null
+        return runCatching {
+            val addr = InetAddress.getByName(hostName)
+            var best: Double? = null
+            // Take 1 probe; if elevated (>120ms, e.g. cold NAT/VPN wakeup), take a 2nd warm probe
+            val attempts = 2
+            for (i in 0 until attempts) {
+                val sock = Socket()
+                try {
+                    val t0 = System.nanoTime()
+                    sock.connect(InetSocketAddress(addr, port.coerceIn(1, 65535)), timeoutMs)
+                    val ms = ((System.nanoTime() - t0) / 1_000_000.0).coerceAtLeast(1.0)
+                    best = if (best == null || ms < best!!) ms else best
+                    if (ms <= 120.0) break
+                } finally {
+                    runCatching { sock.close() }
+                }
+            }
+            best
+        }.getOrNull()
+    }
+
     suspend fun collectMetrics(host: SSHHost, allHosts: List<SSHHost>): Triple<HostMetrics?, Double, String?> =
         withContext(Dispatchers.IO) {
             val started = System.nanoTime()
@@ -215,13 +239,19 @@ class SshManager(private val store: SecureStore) {
                     timeoutMs = 15_000
                 )
                 val totalMs = (System.nanoTime() - started) / 1_000_000.0
+                // Measure pure TCP SYN->SYN-ACK RTT AFTER exec succeeds so VPN/P2P route is already warm
+                val warmTcpRtt = if (host.proxyJumpAlias.isBlank()) {
+                    measureTcpRttMs(host.hostName, host.port)
+                } else {
+                    null
+                }
                 val parsed = RemoteMetricsParser.parse(res.stdout)
                 if (parsed != null) {
-                    val effectiveRtt = (totalMs - (parsed.scriptDurationMs ?: 0.0)).coerceAtLeast(1.0)
+                    val effectiveRtt = warmTcpRtt ?: (totalMs - (parsed.scriptDurationMs ?: 0.0)).coerceAtLeast(1.0)
                     Triple(parsed, effectiveRtt, null)
                 } else {
                     val err = res.stderr.trim().ifBlank { "Exit ${res.exitCode}: metrics parse failed" }
-                    Triple(null, totalMs, err.take(180))
+                    Triple(null, warmTcpRtt ?: totalMs, err.take(180))
                 }
             } catch (t: Throwable) {
                 val totalMs = (System.nanoTime() - started) / 1_000_000.0
