@@ -71,6 +71,18 @@ public struct ControlPlaneClientCert: Codable, Equatable, Sendable {
     }
 }
 
+public struct ControlPlaneSshKey: Codable, Equatable, Sendable {
+    public let deviceId: String
+    public let deviceName: String
+    public let publicKey: String
+
+    enum CodingKeys: String, CodingKey {
+        case deviceId = "device_id"
+        case deviceName = "device_name"
+        case publicKey = "public_key"
+    }
+}
+
 public struct ControlPlaneStateResponse: Codable, Sendable {
     public let token: String?
     public let user: ControlPlaneUser
@@ -78,10 +90,12 @@ public struct ControlPlaneStateResponse: Codable, Sendable {
     public let mesh: ControlPlaneMeshInfo
     public let devices: [ControlPlaneDevice]
     public let clientCerts: [ControlPlaneClientCert]
+    public let sshPublicKeys: [ControlPlaneSshKey]
 
     enum CodingKeys: String, CodingKey {
         case token, user, device, mesh, devices
         case clientCerts = "client_certs"
+        case sshPublicKeys = "ssh_public_keys"
     }
 
     public init(from decoder: Decoder) throws {
@@ -92,6 +106,7 @@ public struct ControlPlaneStateResponse: Codable, Sendable {
         mesh = try c.decode(ControlPlaneMeshInfo.self, forKey: .mesh)
         devices = try c.decodeIfPresent([ControlPlaneDevice].self, forKey: .devices) ?? []
         clientCerts = try c.decodeIfPresent([ControlPlaneClientCert].self, forKey: .clientCerts) ?? []
+        sshPublicKeys = try c.decodeIfPresent([ControlPlaneSshKey].self, forKey: .sshPublicKeys) ?? []
     }
 }
 
@@ -259,6 +274,32 @@ public final class ControlPlaneClient: Sendable {
             "device_name": deviceName,
             "unique_id": uniqueId,
             "cert_pem": certPem
+        ]
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (data, resp) = try await session.data(for: req)
+        if let http = resp as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+            let text = String(data: data, encoding: .utf8) ?? "HTTP \(http.statusCode)"
+            throw ControlPlaneError.serverError(text)
+        }
+    }
+
+    public func registerSshPublicKey(
+        serverUrl: String,
+        token: String,
+        deviceName: String,
+        publicKey: String
+    ) async throws {
+        let base = serverUrl.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
+        guard let url = URL(string: "\(base)/api/v1/ssh-keys/register") else {
+            throw ControlPlaneError.invalidURL
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        let body: [String: Any] = [
+            "device_name": deviceName,
+            "public_key": publicKey
         ]
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
         let (data, resp) = try await session.data(for: req)
@@ -452,6 +493,75 @@ public enum EmbeddedEasyTierManager {
         try toml.write(to: runtimeTomlURL, atomically: true, encoding: .utf8)
         try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: runtimeTomlURL.path)
         return runtimeTomlURL
+    }
+
+    public static func ensureLocalSshPublicKey() -> String? {
+        let sshDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".ssh", isDirectory: true)
+        try? FileManager.default.createDirectory(at: sshDir, withIntermediateDirectories: true)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: sshDir.path)
+
+        for cand in ["id_ed25519.pub", "id_rsa.pub"] {
+            let p = sshDir.appendingPathComponent(cand)
+            if let txt = try? String(contentsOf: p, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
+               txt.hasPrefix("ssh-ed25519 ") || txt.hasPrefix("ssh-rsa ") || txt.hasPrefix("ecdsa-sha2-") {
+                return txt
+            }
+        }
+        let keyURL = sshDir.appendingPathComponent("id_ed25519")
+        let pubURL = sshDir.appendingPathComponent("id_ed25519.pub")
+        if !FileManager.default.fileExists(atPath: keyURL.path) {
+            let host = Host.current().localizedName ?? "mac"
+            _ = ProcessRunner.run(
+                executable: "/usr/bin/ssh-keygen",
+                arguments: ["-t", "ed25519", "-N", "", "-f", keyURL.path, "-C", "nodedeck@\(host)", "-q"],
+                timeout: 10
+            )
+        }
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: keyURL.path)
+        return try? String(contentsOf: pubURL, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    @discardableResult
+    public static func syncAccountSshPublicKeys(_ keys: [ControlPlaneSshKey]) -> Int {
+        guard !keys.isEmpty else { return 0 }
+        let sshDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".ssh", isDirectory: true)
+        try? FileManager.default.createDirectory(at: sshDir, withIntermediateDirectories: true)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: sshDir.path)
+
+        let authURL = sshDir.appendingPathComponent("authorized_keys")
+        var lines = (try? String(contentsOf: authURL, encoding: .utf8))?
+            .components(separatedBy: .newlines)
+            .filter { !$0.isEmpty } ?? []
+        var existingBlobs = Set<String>()
+        for ln in lines {
+            let parts = ln.split(separator: " ", omittingEmptySubsequences: true)
+            if parts.count >= 2 {
+                existingBlobs.insert("\(parts[0]) \(parts[1])")
+            }
+        }
+
+        var added = 0
+        for item in keys {
+            let pub = item.publicKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !pub.isEmpty, !pub.contains("\n"), !pub.contains("\r") else { continue }
+            let parts = pub.split(separator: " ", omittingEmptySubsequences: true)
+            guard parts.count >= 2,
+                  parts[0].hasPrefix("ssh-ed25519") || parts[0].hasPrefix("ssh-rsa") || parts[0].hasPrefix("ecdsa-sha2-") else {
+                continue
+            }
+            let blob = "\(parts[0]) \(parts[1])"
+            guard !existingBlobs.contains(blob) else { continue }
+            let safeName = item.deviceName.replacingOccurrences(of: " ", with: "_")
+            lines.append("\(blob) nodedeck-\(safeName)")
+            existingBlobs.insert(blob)
+            added += 1
+        }
+        if added > 0 {
+            let out = lines.joined(separator: "\n") + "\n"
+            try? out.write(to: authURL, atomically: true, encoding: .utf8)
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: authURL.path)
+        }
+        return added
     }
 
     public static func readPublicMoonlightIdentity() -> (uniqueId: String, certPem: String)? {

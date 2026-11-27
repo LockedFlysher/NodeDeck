@@ -206,6 +206,116 @@ def sync_client_certs_to_sunshine(target_user: str, client_certs: list[dict[str,
     return True
 
 
+def ensure_local_ssh_pubkey(target_user: str) -> str:
+    """Ensure target_user has an Ed25519 SSH keypair (generating one if absent) and return its public key."""
+    try:
+        pw = pwd.getpwnam(target_user)
+        home = Path(pw.pw_dir)
+        uid, gid = pw.pw_uid, pw.pw_gid
+    except KeyError:
+        home = Path.home()
+        uid = gid = -1
+
+    ssh_dir = home / ".ssh"
+    ssh_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(ssh_dir, 0o700)
+    if os.geteuid() == 0 and uid >= 0:
+        os.chown(ssh_dir, uid, gid)
+
+    for cand in ("id_ed25519.pub", "id_rsa.pub"):
+        p = ssh_dir / cand
+        if p.exists():
+            txt = p.read_text(encoding="utf-8", errors="ignore").strip()
+            if txt.startswith(("ssh-ed25519 ", "ssh-rsa ", "ecdsa-sha2-")):
+                return txt
+
+    key_path = ssh_dir / "id_ed25519"
+    pub_path = ssh_dir / "id_ed25519.pub"
+    if not key_path.exists():
+        comment = f"nodedeck@{socket.gethostname()}"
+        cmd = ["ssh-keygen", "-t", "ed25519", "-N", "", "-f", str(key_path), "-C", comment, "-q"]
+        if os.geteuid() == 0 and uid > 0:
+            subprocess.run(["runuser", "-u", target_user, "--"] + cmd, check=False)
+        else:
+            subprocess.run(cmd, check=False)
+    if os.geteuid() == 0 and uid >= 0:
+        for f in (key_path, pub_path):
+            if f.exists():
+                os.chown(f, uid, gid)
+    if key_path.exists():
+        os.chmod(key_path, 0o600)
+    if pub_path.exists():
+        os.chmod(pub_path, 0o644)
+        return pub_path.read_text(encoding="utf-8", errors="ignore").strip()
+    return ""
+
+
+def sync_ssh_keys_to_authorized_keys(target_user: str, ssh_public_keys: list[dict[str, Any]]) -> bool:
+    """Append authenticated same-account devices' SSH public keys into ~target_user/.ssh/authorized_keys."""
+    if not ssh_public_keys:
+        return False
+    try:
+        pw = pwd.getpwnam(target_user)
+        home = Path(pw.pw_dir)
+        uid, gid = pw.pw_uid, pw.pw_gid
+    except KeyError:
+        home = Path.home()
+        uid = gid = -1
+
+    ssh_dir = home / ".ssh"
+    ssh_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(ssh_dir, 0o700)
+    auth_file = ssh_dir / "authorized_keys"
+    existing_lines = auth_file.read_text(encoding="utf-8", errors="ignore").splitlines() if auth_file.exists() else []
+    # Deduplicate by (key_type, key_blob)
+    existing_blobs = set()
+    for ln in existing_lines:
+        parts = ln.strip().split()
+        if len(parts) >= 2:
+            existing_blobs.add((parts[0], parts[1]))
+
+    added = False
+    for item in ssh_public_keys:
+        pub = str(item.get("public_key") or "").strip()
+        if not pub or "\n" in pub or "\r" in pub:
+            continue
+        parts = pub.split()
+        if len(parts) < 2 or not parts[0].startswith(("ssh-ed25519", "ssh-rsa", "ecdsa-sha2-")):
+            continue
+        blob = (parts[0], parts[1])
+        if blob in existing_blobs:
+            continue
+        dev_name = re.sub(r"[^A-Za-z0-9._-]", "_", str(item.get("device_name") or "device"))
+        existing_lines.append(f"{parts[0]} {parts[1]} nodedeck-{dev_name}")
+        existing_blobs.add(blob)
+        added = True
+
+    if not added:
+        return False
+    auth_file.write_text("\n".join(existing_lines).rstrip() + "\n", encoding="utf-8")
+    os.chmod(auth_file, 0o600)
+    if os.geteuid() == 0 and uid >= 0:
+        os.chown(ssh_dir, uid, gid)
+        os.chown(auth_file, uid, gid)
+    return True
+
+
+def register_local_ssh_pubkey(server_url: str, token: str, device_name: str, target_user: str) -> None:
+    pub = ensure_local_ssh_pubkey(target_user)
+    if not pub:
+        return
+    try:
+        api_request(
+            server_url,
+            "POST",
+            "/api/v1/ssh-keys/register",
+            payload={"device_name": device_name, "public_key": pub},
+            token=token,
+        )
+    except Exception as exc:
+        print(f"[nodedeck-mesh] ssh-key register warning: {exc}", flush=True)
+
+
 def reload_user_sunshine(target_user: str) -> None:
     try:
         pw = pwd.getpwnam(target_user)
@@ -371,6 +481,10 @@ def cmd_auth(args: argparse.Namespace, is_register: bool) -> int:
         synced = sync_client_certs_to_sunshine(ssh_user, resp["client_certs"])
         if synced:
             print(f"[nodedeck-mesh] Synced {len(resp['client_certs'])} client certificate(s) to Sunshine", flush=True)
+    register_local_ssh_pubkey(args.server, resp["token"], resp["device"]["device_name"], ssh_user)
+    if resp.get("ssh_public_keys"):
+        if sync_ssh_keys_to_authorized_keys(ssh_user, resp["ssh_public_keys"]):
+            print(f"[nodedeck-mesh] Synced {len(resp['ssh_public_keys'])} account SSH key(s)", flush=True)
 
     dev = resp["device"]
     print(f"Signed in as {resp['user']['username']} -> {dev['device_name']} ({dev['virtual_cidr']})")
@@ -463,6 +577,9 @@ def cmd_daemon(args: argparse.Namespace) -> int:
             sess = hb
             if sunshine_enabled and hb.get("client_certs"):
                 sync_client_certs_to_sunshine(ssh_user, hb["client_certs"])
+            register_local_ssh_pubkey(sess["server_url"], sess["token"], hb["device"]["device_name"], ssh_user)
+            if hb.get("ssh_public_keys"):
+                sync_ssh_keys_to_authorized_keys(ssh_user, hb["ssh_public_keys"])
             last_hb = time.time()
         except Exception as exc:
             print(f"[nodedeck-mesh] heartbeat warning: {exc}", flush=True)
@@ -541,6 +658,9 @@ def cmd_daemon(args: argparse.Namespace) -> int:
                     save_session(state_dir, hb)
                     if sunshine_enabled and hb.get("client_certs"):
                         sync_client_certs_to_sunshine(ssh_user, hb["client_certs"])
+                    register_local_ssh_pubkey(latest["server_url"], latest["token"], hb["device"]["device_name"], ssh_user)
+                    if hb.get("ssh_public_keys"):
+                        sync_ssh_keys_to_authorized_keys(ssh_user, hb["ssh_public_keys"])
                     last_hb = time.time()
                 except Exception as exc:
                     print(f"[nodedeck-mesh] heartbeat warning: {exc}", flush=True)

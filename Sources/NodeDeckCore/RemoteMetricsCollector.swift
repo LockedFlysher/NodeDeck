@@ -91,6 +91,7 @@ public enum RemoteMetricsCollector {
                 arguments: [
                     "-T",
                     "-o", "BatchMode=yes",
+                    "-o", "StrictHostKeyChecking=accept-new",
                     "-o", "ControlMaster=auto",
                     "-o", "ControlPath=\(controlPathTemplate)",
                     "-o", "ControlPersist=60",

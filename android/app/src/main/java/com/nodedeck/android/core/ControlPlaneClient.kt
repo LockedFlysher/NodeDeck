@@ -106,6 +106,12 @@ class ControlPlaneClient {
     )
 
     @Serializable
+    private data class SshKeyRegisterBody(
+        @SerialName("device_name") val deviceName: String,
+        @SerialName("public_key") val publicKey: String
+    )
+
+    @Serializable
     private data class ErrorBody(val error: String? = null)
 
     suspend fun register(
@@ -191,6 +197,34 @@ class ControlPlaneClient {
             if (code !in 200..299) {
                 val err = conn.errorStream?.bufferedReader()?.readText().orEmpty()
                 throw IllegalStateException("Cert sync HTTP $code: $err")
+            }
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    suspend fun registerSshPublicKey(
+        serverUrl: String,
+        token: String,
+        deviceName: String,
+        publicKey: String
+    ) = withContext(Dispatchers.IO) {
+        val body = json.encodeToString(SshKeyRegisterBody(deviceName, publicKey))
+        val base = serverUrl.trimEnd('/')
+        val conn = (URL("$base/api/v1/ssh-keys/register").openConnection() as HttpURLConnection).apply {
+            connectTimeout = 10_000
+            readTimeout = 10_000
+            requestMethod = "POST"
+            doOutput = true
+            setRequestProperty("Content-Type", "application/json; charset=utf-8")
+            setRequestProperty("Authorization", "Bearer $token")
+        }
+        try {
+            conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+            val code = conn.responseCode
+            if (code !in 200..299) {
+                val err = conn.errorStream?.bufferedReader()?.readText().orEmpty()
+                throw IllegalStateException("SSH key sync HTTP $code: $err")
             }
         } finally {
             conn.disconnect()

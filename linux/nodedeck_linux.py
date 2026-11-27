@@ -5,9 +5,11 @@ import base64
 import hashlib
 import json
 import os
+import pty
 import random
 import re
 import secrets
+import select
 import socket
 import ssl
 import subprocess
@@ -122,6 +124,156 @@ def load_sunshine_hosts_dict() -> dict:
                 migrated[item["hostAlias"]] = item
         save_json(SUNSHINE_FILE, migrated)
     return migrated
+
+
+def ensure_local_ssh_pubkey() -> str:
+    """Ensure current user has an Ed25519 SSH keypair (generating one if missing) and return its public key."""
+    ssh_dir = Path.home() / ".ssh"
+    ssh_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(ssh_dir, 0o700)
+    for cand in ("id_ed25519.pub", "id_rsa.pub"):
+        p = ssh_dir / cand
+        if p.exists():
+            txt = p.read_text(encoding="utf-8", errors="ignore").strip()
+            if txt.startswith(("ssh-ed25519 ", "ssh-rsa ", "ecdsa-sha2-")):
+                return txt
+    key_path = ssh_dir / "id_ed25519"
+    pub_path = ssh_dir / "id_ed25519.pub"
+    if not key_path.exists():
+        subprocess.run(
+            ["ssh-keygen", "-t", "ed25519", "-N", "", "-f", str(key_path), "-C", f"nodedeck@{socket.gethostname()}", "-q"],
+            check=False,
+        )
+    if key_path.exists():
+        os.chmod(key_path, 0o600)
+    if pub_path.exists():
+        os.chmod(pub_path, 0o644)
+        return pub_path.read_text(encoding="utf-8", errors="ignore").strip()
+    return ""
+
+
+def upload_linux_ssh_pubkey(acct: dict) -> bool:
+    token = str(acct.get("token") or "").strip()
+    server_url = str(acct.get("server_url") or DEFAULT_CONTROL_SERVER).rstrip("/")
+    pub = ensure_local_ssh_pubkey()
+    if not token or not server_url or not pub:
+        return False
+    try:
+        dev_name = str(acct.get("device", {}).get("device_name") or socket.gethostname())
+        req = urllib.request.Request(
+            f"{server_url}/api/v1/ssh-keys/register",
+            data=json.dumps({"device_name": dev_name, "public_key": pub}).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json; charset=utf-8",
+                "Authorization": f"Bearer {token}",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return 200 <= resp.status < 300
+    except Exception:
+        return False
+
+
+def sync_account_ssh_keys(acct: dict) -> int:
+    keys = acct.get("ssh_public_keys") or []
+    if not keys:
+        return 0
+    ssh_dir = Path.home() / ".ssh"
+    ssh_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(ssh_dir, 0o700)
+    auth_file = ssh_dir / "authorized_keys"
+    lines = auth_file.read_text(encoding="utf-8", errors="ignore").splitlines() if auth_file.exists() else []
+    blobs = set()
+    for ln in lines:
+        p = ln.strip().split()
+        if len(p) >= 2:
+            blobs.add((p[0], p[1]))
+    added = 0
+    for item in keys:
+        pub = str(item.get("public_key") or "").strip()
+        if not pub or "\n" in pub or "\r" in pub:
+            continue
+        p = pub.split()
+        if len(p) < 2 or not p[0].startswith(("ssh-ed25519", "ssh-rsa", "ecdsa-sha2-")):
+            continue
+        if (p[0], p[1]) in blobs:
+            continue
+        dev_name = re.sub(r"[^A-Za-z0-9._-]", "_", str(item.get("device_name") or "device"))
+        lines.append(f"{p[0]} {p[1]} nodedeck-{dev_name}")
+        blobs.add((p[0], p[1]))
+        added += 1
+    if added:
+        auth_file.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+        os.chmod(auth_file, 0o600)
+    return added
+
+
+def install_ssh_pubkey_with_password(hostname: str, port: int, user: str, password: str) -> tuple[bool, str]:
+    """Authenticate once with user/password over SSH PTY and install local Ed25519 public key for passwordless login."""
+    pub = ensure_local_ssh_pubkey()
+    if not pub:
+        return False, "Failed to generate local Ed25519 SSH keypair"
+    pub_b64 = base64.b64encode((pub + "\n").encode("utf-8")).decode("ascii")
+    remote_cmd = (
+        f"mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && "
+        f"KEY=$(printf '%s' '{pub_b64}' | base64 -d) && "
+        f"(grep -qxF \"$KEY\" ~/.ssh/authorized_keys || printf '%s\\n' \"$KEY\" >> ~/.ssh/authorized_keys) && "
+        f"echo NODEDECK_KEY_INSTALLED"
+    )
+    cmd = [
+        "ssh",
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "PreferredAuthentications=password,keyboard-interactive",
+        "-o", "PubkeyAuthentication=no",
+        "-o", "NumberOfPasswordPrompts=1",
+        "-o", "ConnectTimeout=8",
+        "-p", str(port),
+        f"{user}@{hostname}",
+        remote_cmd,
+    ]
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.execvp("ssh", cmd)
+    out = b""
+    pw_sent = False
+    deadline = time.time() + 18.0
+    try:
+        while time.time() < deadline:
+            r, _, _ = select.select([fd], [], [], 0.25)
+            if r:
+                try:
+                    chunk = os.read(fd, 4096)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                out += chunk
+                low = out.lower()
+                if not pw_sent and (b"password:" in low or b"verification code" in low or "密码".encode("utf-8") in out):
+                    os.write(fd, (password + "\n").encode("utf-8"))
+                    pw_sent = True
+                if b"NODEDECK_KEY_INSTALLED" in out:
+                    break
+            else:
+                wpid, _ = os.waitpid(pid, os.WNOHANG)
+                if wpid != 0:
+                    break
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            os.waitpid(pid, 0)
+        except ChildProcessError:
+            pass
+    text = out.decode("utf-8", errors="ignore")
+    if "NODEDECK_KEY_INSTALLED" in text:
+        return True, "OK"
+    if "Permission denied" in text or "Authentication failed" in text:
+        return False, "密码错误或该主机未开启 SSH 密码登录 (Permission denied)"
+    return False, (text.strip().splitlines()[-1] if text.strip() else "SSH authorization failed")
 
 
 def detect_default_lang() -> str:
@@ -240,6 +392,7 @@ def ssh_mux_base_args(alias: str, connect_timeout: int = 5):
         "ssh",
         "-T",
         "-o", "BatchMode=yes",
+        "-o", "StrictHostKeyChecking=accept-new",
         "-o", "ControlMaster=auto",
         "-o", f"ControlPath={SSH_MUX_DIR}/%C",
         "-o", "ControlPersist=60",
@@ -853,6 +1006,8 @@ class NodeDeckWindow(Gtk.Window):
             try:
                 fresh = fetch_live_account_state(acct) or acct
                 upload_linux_client_cert(fresh)
+                upload_linux_ssh_pubkey(fresh)
+                sync_account_ssh_keys(fresh)
                 added = self._sync_account_devices_to_linux(fresh)
                 GLib.idle_add(self._on_account_synced, fresh, added, silent, None)
             except Exception as exc:
@@ -1103,6 +1258,7 @@ class NodeDeckWindow(Gtk.Window):
             add_item(self.t("启动远程桌面", "Launch Remote Desktop"), lambda: self.launch_stream(saved))
         add_item("VS Code Remote SSH", lambda: self.open_vscode_remote(h))
         add_item(self.t("刷新状态", "Refresh Metrics"), lambda: self.refresh_metrics_async(alias))
+        add_item(self.t("输入密码配置免密登录", "Authorize SSH Key with Password"), lambda: self.on_authorize_host_password(h))
         menu.append(Gtk.SeparatorMenuItem())
         pin_lbl = self.t("取消置顶", "Unpin") if alias in self.pinned_aliases else self.t("置顶设备", "Pin to Top")
         add_item(pin_lbl, lambda: self.toggle_pin_host(alias))
@@ -1117,6 +1273,84 @@ class NodeDeckWindow(Gtk.Window):
         menu.show_all()
         menu.popup_at_pointer(event)
         return True
+
+    def on_authorize_host_password(self, host: dict):
+        dlg = Gtk.Dialog(
+            title=self.t(f"授权 SSH 免密登录 · {host['alias']}", f"Authorize SSH Key · {host['alias']}"),
+            transient_for=self,
+            flags=0,
+        )
+        dlg.set_default_size(420, 210)
+        box = dlg.get_content_area()
+        box.set_spacing(10)
+        box.set_margin_top(14)
+        box.set_margin_bottom(14)
+        box.set_margin_start(16)
+        box.set_margin_end(16)
+
+        hint = Gtk.Label(
+            label=self.t(
+                f"输入 {host['hostname']}:{host['port']} 的登录账号与密码（仅用一次，不会保存密码）。\nNodeDeck 将自动生成本地 Ed25519 公钥并安装到目标主机，之后永久免密直连。",
+                f"Enter credentials for {host['hostname']}:{host['port']} (used once, never saved).\nNodeDeck will install your local Ed25519 public key for permanent passwordless SSH.",
+            )
+        )
+        hint.set_xalign(0)
+        hint.set_line_wrap(True)
+        box.pack_start(hint, False, False, 0)
+
+        ent_user = Gtk.Entry()
+        ent_user.set_text(host["user"])
+        ent_user.set_placeholder_text(self.t("目标用户名", "Username"))
+        box.pack_start(ent_user, False, False, 0)
+
+        ent_pwd = Gtk.Entry()
+        ent_pwd.set_visibility(False)
+        ent_pwd.set_placeholder_text(self.t("目标用户密码", "Password"))
+        box.pack_start(ent_pwd, False, False, 0)
+
+        dlg.add_buttons(
+            self.t("取消", "Cancel"),
+            Gtk.ResponseType.CANCEL,
+            self.t("授权并配置免密", "Authorize & Install Key"),
+            Gtk.ResponseType.OK,
+        )
+        dlg.show_all()
+        resp = dlg.run()
+        u = ent_user.get_text().strip() or host["user"]
+        p = ent_pwd.get_text()
+        dlg.destroy()
+        if resp != Gtk.ResponseType.OK or not p:
+            return
+
+        if u != host["user"]:
+            update_ssh_host(host["alias"], host["alias"], host["hostname"], u, str(host["port"]))
+            host["user"] = u
+
+        self.status_label.set_text(self.t(f"正在向 {host['alias']} 安装 Ed25519 公钥…", f"Installing SSH key on {host['alias']}…"))
+
+        def worker():
+            ok, msg = install_ssh_pubkey_with_password(host["hostname"], int(host["port"]), u, p)
+            GLib.idle_add(self._on_authorize_done, host["alias"], ok, msg)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_authorize_done(self, alias: str, ok: bool, msg: str):
+        if ok:
+            self.status_label.set_text(self.t(f"已为 {alias} 配置免密公钥，正在刷新…", f"Installed SSH key on {alias}, refreshing…"))
+            self.reload_hosts()
+            self.refresh_metrics_async(alias)
+        else:
+            self.status_label.set_text(self.t(f"授权失败 ({alias}): {msg}", f"Auth failed ({alias}): {msg}"))
+            err_dlg = Gtk.MessageDialog(
+                transient_for=self,
+                flags=0,
+                message_type=Gtk.MessageType.ERROR,
+                buttons=Gtk.ButtonsType.OK,
+                text=self.t(f"无法授权 {alias}", f"Failed to authorize {alias}"),
+            )
+            err_dlg.format_secondary_text(msg)
+            err_dlg.run()
+            err_dlg.destroy()
 
     def open_vscode_remote(self, host: dict):
         code_bin = None
@@ -1332,7 +1566,13 @@ class NodeDeckWindow(Gtk.Window):
                 label=f"{m.get('OS', 'Linux')} ({m.get('KERNEL', '')}) · {m.get('CORES', '?')} cores · RTT {m.get('RTT_MS', '?')} ms"
             )
         summary_lbl.set_xalign(0)
+        summary_lbl.set_line_wrap(True)
         m_head.pack_start(summary_lbl, True, True, 0)
+        if m and "error" in m:
+            btn_auth_pwd = Gtk.Button(label=self.t("输入密码配置免密", "Enter Password & Trust Key"))
+            btn_auth_pwd.get_style_context().add_class("suggested-action")
+            btn_auth_pwd.connect("clicked", lambda *_: self.on_authorize_host_password(h))
+            m_head.pack_start(btn_auth_pwd, False, False, 0)
         btn_probe = Gtk.Button(label=self.t("刷新指标", "Refresh Metrics"))
         btn_probe.connect("clicked", lambda *_: self.refresh_metrics_async(h["alias"]))
         m_head.pack_start(btn_probe, False, False, 0)

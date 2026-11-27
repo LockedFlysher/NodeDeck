@@ -103,6 +103,16 @@ def init_db() -> None:
                     updated_at INTEGER NOT NULL,
                     UNIQUE(user_id, device_id)
                 );
+
+                CREATE TABLE IF NOT EXISTS ssh_keys (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    device_id TEXT NOT NULL,
+                    device_name TEXT NOT NULL,
+                    public_key TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    UNIQUE(user_id, device_id)
+                );
                 """
             )
             conn.commit()
@@ -274,6 +284,10 @@ def build_state_payload(
         "SELECT device_id, device_name, unique_id, cert_pem, updated_at FROM client_certs WHERE user_id = ?",
         (user["id"],),
     ).fetchall()
+    ssh_rows = conn.execute(
+        "SELECT device_id, device_name, public_key, updated_at FROM ssh_keys WHERE user_id = ?",
+        (user["id"],),
+    ).fetchall()
 
     payload: dict[str, Any] = {
         "user": {
@@ -297,6 +311,15 @@ def build_state_payload(
                 "updated_at": int(c["updated_at"]),
             }
             for c in cert_rows
+        ],
+        "ssh_public_keys": [
+            {
+                "device_id": k["device_id"],
+                "device_name": k["device_name"],
+                "public_key": k["public_key"],
+                "updated_at": int(k["updated_at"]),
+            }
+            for k in ssh_rows
         ],
     }
     if token is not None:
@@ -546,6 +569,8 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
             self._handle_heartbeat(body)
         elif path == "/api/v1/certs/register":
             self._handle_cert_register(body)
+        elif path == "/api/v1/ssh-keys/register":
+            self._handle_ssh_key_register(body)
         else:
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
 
@@ -689,6 +714,45 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
                         updated_at = excluded.updated_at
                     """,
                     (user["id"], dev["device_id"], device_name, unique_id, cert_pem + "\n", now),
+                )
+                conn.commit()
+                self._send_json(HTTPStatus.OK, {"ok": True})
+            finally:
+                conn.close()
+
+    def _handle_ssh_key_register(self, body: dict[str, Any]) -> None:
+        pubkey = str(body.get("public_key") or "").strip()
+        allowed_prefixes = (
+            "ssh-ed25519 ",
+            "ssh-rsa ",
+            "ecdsa-sha2-nistp256 ",
+            "ecdsa-sha2-nistp384 ",
+            "ecdsa-sha2-nistp521 ",
+        )
+        if not pubkey or "\n" in pubkey or "\r" in pubkey or len(pubkey) > 4096 or not pubkey.startswith(allowed_prefixes):
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Valid single-line OpenSSH public_key required"})
+            return
+
+        with DB_LOCK:
+            conn = get_db()
+            try:
+                auth = self._authenticate(conn)
+                if auth is None:
+                    self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "Unauthorized"})
+                    return
+                user, dev, _ = auth
+                now = int(time.time())
+                device_name = str(body.get("device_name") or dev["device_name"]).strip()[:64]
+                conn.execute(
+                    """
+                    INSERT INTO ssh_keys (user_id, device_id, device_name, public_key, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(user_id, device_id) DO UPDATE SET
+                        device_name = excluded.device_name,
+                        public_key = excluded.public_key,
+                        updated_at = excluded.updated_at
+                    """,
+                    (user["id"], dev["device_id"], device_name, pubkey, now),
                 )
                 conn.commit()
                 self._send_json(HTTPStatus.OK, {"ok": True})

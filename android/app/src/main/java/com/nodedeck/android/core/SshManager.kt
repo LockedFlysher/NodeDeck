@@ -5,6 +5,7 @@ import com.jcraft.jsch.ChannelExec
 import com.jcraft.jsch.ChannelSftp
 import com.jcraft.jsch.ChannelShell
 import com.jcraft.jsch.JSch
+import com.jcraft.jsch.KeyPair
 import com.jcraft.jsch.Session
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -74,6 +75,43 @@ class SshManager(private val store: SecureStore) {
 
     fun activeForwardIds(): Set<String> =
         activeForwards.entries.filter { isForwardActive(it.key) }.map { it.key }.toSet()
+
+    /**
+     * Ensures Android has a local SSH keypair in app-private storage (generating a new Ed25519 keypair
+     * on first launch if none exists) and returns its single-line OpenSSH public key for account mesh exchange.
+     */
+    fun ensureLocalSshPublicKey(comment: String = "nodedeck-android"): String? {
+        val jsch = JSch()
+        for (name in listOf("id_ed25519", "id_rsa")) {
+            val pem = store.readPrivateKey(name) ?: continue
+            val pub = runCatching {
+                val kp = KeyPair.load(jsch, pem.toByteArray(Charsets.UTF_8), null)
+                try {
+                    val out = ByteArrayOutputStream()
+                    kp.writePublicKey(out, comment)
+                    out.toString("UTF-8").trim()
+                } finally {
+                    kp.dispose()
+                }
+            }.getOrNull()
+            if (!pub.isNullOrBlank() && (pub.startsWith("ssh-ed25519 ") || pub.startsWith("ssh-rsa ") || pub.startsWith("ecdsa-sha2-"))) {
+                return pub
+            }
+        }
+        return runCatching {
+            val kp = KeyPair.genKeyPair(jsch, KeyPair.ED25519)
+            try {
+                val privOut = ByteArrayOutputStream()
+                val pubOut = ByteArrayOutputStream()
+                kp.writePrivateKey(privOut)
+                kp.writePublicKey(pubOut, comment)
+                store.savePrivateKey("id_ed25519", privOut.toString("UTF-8"))
+                pubOut.toString("UTF-8").trim()
+            } finally {
+                kp.dispose()
+            }
+        }.getOrNull()
+    }
 
     private fun openSessionChain(
         host: SSHHost,

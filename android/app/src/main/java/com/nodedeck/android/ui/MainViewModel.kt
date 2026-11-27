@@ -266,17 +266,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
         store.saveMeshConfig(meshCfg)
 
-        // Upload this phone's public Moonlight client cert so all user's Linux hosts auto-pair it
+        // Upload this phone's public Moonlight client cert AND local SSH public key so all user's hosts auto-trust it
         if (token.isNotBlank()) {
+            val devName = session.deviceName.ifBlank { ControlPlaneClient.defaultDeviceName() }
             runCatching {
                 val (uid, certPem) = withContext(Dispatchers.IO) { sunshineClient.getPublicIdentity() }
                 controlPlaneClient.registerClientCert(
                     serverUrl = session.serverUrl,
                     token = token,
-                    deviceName = session.deviceName.ifBlank { ControlPlaneClient.defaultDeviceName() },
+                    deviceName = devName,
                     uniqueId = uid,
                     certPem = certPem
                 )
+            }
+            runCatching {
+                val sshPub = withContext(Dispatchers.IO) { sshManager.ensureLocalSshPublicKey("nodedeck-$devName") }
+                if (!sshPub.isNullOrBlank()) {
+                    controlPlaneClient.registerSshPublicKey(
+                        serverUrl = session.serverUrl,
+                        token = token,
+                        deviceName = devName,
+                        publicKey = sshPub
+                    )
+                }
             }
         }
 

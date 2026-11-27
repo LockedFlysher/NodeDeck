@@ -107,6 +107,19 @@ extension HostMonitor {
             )
         }
 
+        // Publish Mac's local Ed25519 SSH public key & sync same-account SSH public keys into ~/.ssh/authorized_keys
+        if !token.isEmpty, let pubKey = EmbeddedEasyTierManager.ensureLocalSshPublicKey() {
+            try? await controlPlaneClient.registerSshPublicKey(
+                serverUrl: session.serverUrl,
+                token: token,
+                deviceName: session.deviceName,
+                publicKey: pubKey
+            )
+        }
+        if !response.sshPublicKeys.isEmpty {
+            _ = EmbeddedEasyTierManager.syncAccountSshPublicKeys(response.sshPublicKeys)
+        }
+
         // Auto-authorize same-account clients' Moonlight public certs into local macOS NodeDeckHost
         if !response.clientCerts.isEmpty {
             _ = SunshineHostManager.shared.syncAccountClientCertificates(response.clientCerts)
