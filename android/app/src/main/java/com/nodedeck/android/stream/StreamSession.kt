@@ -341,6 +341,8 @@ class StreamSession(
                     conf.write_text(txt, encoding="utf-8")
 
                     if sysname == "Darwin":
+                        # NodeDeck.app supervises nodedeck-host and automatically respawns it with intact TCC permissions
+                        subprocess.run(["pkill", "-x", "nodedeck-host"], check=False)
                         uid = os.getuid()
                         subprocess.run(["launchctl", "kickstart", "-k", f"gui/{uid}/io.nodedeck.host"], check=False)
                     else:

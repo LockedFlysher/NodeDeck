@@ -47,6 +47,10 @@ struct ContentView: View {
             AccountSheet()
                 .environmentObject(store)
         }
+        .sheet(isPresented: $store.isShowingLocalHostSheet) {
+            LocalHostSheet()
+                .environmentObject(store)
+        }
         .alert(
             l10n.t("删除设备 \"\(store.hostPendingDeletion?.alias ?? "")\"？", "Delete Device \"\(store.hostPendingDeletion?.alias ?? "")\"?"),
             isPresented: Binding(

@@ -72,11 +72,20 @@ done
 
 iconutil -c icns "$ICONSET" -o "$APP_PATH/Contents/Resources/AppIcon.icns"
 
-# Embed source-built headless NodeDeckHost.app (zero-Qt Sunshine host) if present
-if [[ -d "$HOST_APP" ]]; then
+# Embed headless nodedeck-host as a direct helper executable inside NodeDeck.app/Contents/Helpers
+# so macOS TCC attributes Screen Recording & Accessibility directly to NodeDeck.app (one app in System Settings).
+if [[ -d "$HOST_APP" && -x "$HOST_APP/Contents/MacOS/nodedeck-host" ]]; then
     mkdir -p "$APP_PATH/Contents/Helpers"
-    rm -rf "$APP_PATH/Contents/Helpers/NodeDeckHost.app"
-    ditto "$HOST_APP" "$APP_PATH/Contents/Helpers/NodeDeckHost.app"
+    cp "$HOST_APP/Contents/MacOS/nodedeck-host" "$APP_PATH/Contents/Helpers/nodedeck-host"
+    chmod 0755 "$APP_PATH/Contents/Helpers/nodedeck-host"
+    if [[ -d "$HOST_APP/Contents/MacOS/host-lib" ]]; then
+        rm -rf "$APP_PATH/Contents/Helpers/host-lib"
+        ditto "$HOST_APP/Contents/MacOS/host-lib" "$APP_PATH/Contents/Helpers/host-lib"
+    fi
+    if [[ -d "$HOST_APP/Contents/Resources/assets" ]]; then
+        rm -rf "$APP_PATH/Contents/Resources/host-assets"
+        ditto "$HOST_APP/Contents/Resources/assets" "$APP_PATH/Contents/Resources/host-assets"
+    fi
 elif [[ -x "$HOST_BIN" ]]; then
     mkdir -p "$APP_PATH/Contents/Helpers"
     cp "$HOST_BIN" "$APP_PATH/Contents/Helpers/nodedeck-host"
@@ -107,7 +116,7 @@ fi
 mkdir -p "$ARTIFACT_DIR"
 rm -f "$ARTIFACT_PATH" "$ARTIFACT_DIR/NodeDeck-macos-universal.zip"
 ditto -c -k --norsrc --keepParent "$APP_PATH" "$ARTIFACT_PATH"
-(cd "$ARTIFACT_DIR" && shasum -a 256 *.zip *.deb 2>/dev/null > SHA256SUMS.txt || shasum -a 256 "$(basename "$ARTIFACT_PATH")" > SHA256SUMS.txt)
+(cd "$ARTIFACT_DIR" && shasum -a 256 *.zip *.deb *.apk 2>/dev/null > SHA256SUMS.txt || shasum -a 256 "$(basename "$ARTIFACT_PATH")" > SHA256SUMS.txt)
 
 if [[ "$INSTALL" == "1" ]]; then
     LSREG="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"

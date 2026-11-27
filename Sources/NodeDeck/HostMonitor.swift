@@ -57,6 +57,8 @@ final class HostMonitor: ObservableObject {
     // Native Sunshine / Moonlight state
     @Published var sunshineHostConfigs: [SunshineHostConfig] = []
     @Published var localSunshineHostState: SunshineHostState = .notInstalled
+    @Published var localHostPermissions: LocalHostPermissionStatus = LocalHostPermissionStatus()
+    @Published var isShowingLocalHostSheet = false
     @Published var isShowingSunshinePairSheet = false
     @Published var sunshinePairTargetHost: SSHHost?
 

@@ -37,6 +37,8 @@ struct SidebarView: View {
             hostList
 
             Divider()
+            localHostQuickBar
+            Divider()
             footer
         }
         .background(.ultraThinMaterial)
@@ -288,6 +290,42 @@ struct SidebarView: View {
         Button(l10n.t("删除设备…", "Delete Device…"), role: .destructive) {
             store.requestDeleteHost(host)
         }
+    }
+
+    private var localHostQuickBar: some View {
+        let running = store.localSunshineHostState == .running
+        let needsPerm = running && (!store.localHostPermissions.screenRecording || store.localHostPermissions.lastLogHint == "TCC_DENIED")
+        return Button {
+            store.isShowingLocalHostSheet = true
+        } label: {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(running ? (needsPerm ? Color.orange : Color.green) : Color.secondary.opacity(0.45))
+                    .frame(width: 8, height: 8)
+                Image(systemName: "desktopcomputer")
+                    .font(.caption)
+                    .foregroundStyle(running ? (needsPerm ? Color.orange : AppTheme.accent) : .secondary)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(running
+                        ? (needsPerm
+                            ? l10n.t("本机被控 · 需授权录屏", "Local Host · Grant Screen")
+                            : l10n.t("本机被控 · 运行中", "Local Host · On"))
+                        : l10n.t("打开本机被控", "Enable Local Host"))
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(needsPerm ? Color.orange : .primary)
+                        .lineLimit(1)
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(l10n.t("配置本机 Mac 被控开关与系统录屏/辅助功能权限", "Configure Local Mac Host & macOS permissions"))
     }
 
     private var footer: some View {

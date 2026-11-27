@@ -30,6 +30,12 @@
     <true/>
     <key>NSAppleEventsUsageDescription</key>
     <string>Used to open SSH connections in Terminal.</string>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>NodeDeck captures the local Mac display to stream it to authorized devices in your account.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>NodeDeck captures system audio for low-latency remote desktop streaming.</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>NodeDeck communicates with hosts over local and encrypted mesh networks.</string>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSPrincipalClass</key>

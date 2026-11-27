@@ -45,30 +45,61 @@ extension HostMonitor {
 
     func refreshLocalSunshineHostState() {
         Task.detached(priority: .utility) {
+            if SunshineHostManager.isAutoStartEnabled && SunshineHostManager.shared.currentState() == .stopped {
+                _ = try? SunshineHostManager.shared.startHost()
+            }
             let state = SunshineHostManager.shared.currentState()
+            let perms = SunshineHostManager.checkPermissions()
             await MainActor.run {
                 self.localSunshineHostState = state
+                self.localHostPermissions = perms
+            }
+        }
+    }
+
+    func setLocalSunshineHostEnabled(_ enabled: Bool) {
+        if enabled {
+            do {
+                _ = try SunshineHostManager.shared.startHost()
+                refreshLocalSunshineHostState()
+                Task { await syncAccountState(silent: true) }
+                let perms = SunshineHostManager.checkPermissions()
+                if !perms.screenRecording {
+                    showFeedback(.info, AppLocalization.shared.t("已启动本机被控，请完成「录屏与系统录音」权限授权后重启生效。", "Local host started. Grant Screen Recording permission to NodeDeck."))
+                } else {
+                    showFeedback(.success, AppLocalization.shared.t("已开启本机被控（其他设备可直接远控这台 Mac）。", "Local Mac Host enabled."))
+                }
+            } catch {
+                let msg = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                showFeedback(.error, msg)
+            }
+        } else {
+            SunshineHostManager.isAutoStartEnabled = false
+            SunshineHostManager.shared.stopHost()
+            refreshLocalSunshineHostState()
+            Task { await syncAccountState(silent: true) }
+            showFeedback(.info, AppLocalization.shared.t("已关闭本机被控服务。", "Local Mac Host disabled."))
+        }
+    }
+
+    func restartLocalSunshineHost() {
+        SunshineHostManager.shared.stopHost()
+        Task.detached(priority: .userInitiated) {
+            usleep(450_000)
+            _ = try? SunshineHostManager.shared.startHost()
+            usleep(1_200_000)
+            let state = SunshineHostManager.shared.currentState()
+            let perms = SunshineHostManager.checkPermissions()
+            await MainActor.run {
+                self.localSunshineHostState = state
+                self.localHostPermissions = perms
+                Task { await self.syncAccountState(silent: true) }
             }
         }
     }
 
     func toggleLocalSunshineHost() {
-        if localSunshineHostState == .running {
-            SunshineHostManager.shared.stopHost()
-            refreshLocalSunshineHostState()
-            Task { await syncAccountState(silent: true) }
-            showFeedback(.info, "已停止本机 Sunshine 被控端服务。")
-        } else {
-            do {
-                _ = try SunshineHostManager.shared.startHost()
-                refreshLocalSunshineHostState()
-                Task { await syncAccountState(silent: true) }
-                showFeedback(.success, "已启动本机 Sunshine 被控端服务（可被其他 NodeDeck 远控）。")
-            } catch {
-                let msg = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-                showFeedback(.error, msg)
-            }
-        }
+        setLocalSunshineHostEnabled(localSunshineHostState != .running)
     }
 
     // MARK: - Linux Multi-User Host Isolation Profiles
