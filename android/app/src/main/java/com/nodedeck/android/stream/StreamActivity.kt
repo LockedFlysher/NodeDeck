@@ -1403,6 +1403,7 @@ private fun StreamScreen(
                                                     if (remoteDisplays.size > 1 && !switchingDisplay) {
                                                         val idx = remoteDisplays.indexOfFirst { it.isSelected }
                                                         val next = remoteDisplays[(idx + 1) % remoteDisplays.size]
+                                                        showSidebar = false
                                                         session.switchRemoteDisplay(next)
                                                     } else {
                                                         activeTab = SidebarTab.DISPLAY
@@ -1542,6 +1543,7 @@ private fun StreamScreen(
                                                         selected = disp.isSelected,
                                                         onClick = {
                                                             if (!switchingDisplay && !disp.isSelected) {
+                                                                showSidebar = false
                                                                 session.switchRemoteDisplay(disp)
                                                             }
                                                         }

@@ -311,12 +311,25 @@ class StreamSession(
         if (_switchingDisplay.value) return
         _switchingDisplay.value = true
         _displayStatus.value = "Switching to ${display.label}…"
+        _state.value = StreamConnectionState.Connecting("Switching to ${display.label}…")
+
+        // Gracefully tear down active Moonlight session BEFORE restarting remote host
+        // so killing nodedeck-host never flashes a false "Stream Disconnected" dialog.
+        launchJob?.cancel()
+        launchJob = null
+        val switchGen = MoonlightNative.nextGeneration()
+        MoonlightNative.interruptAndDisableInput()
+
         scope.launch(Dispatchers.IO) {
             try {
+                MoonlightNative.stopConnectionBlocking()
+                videoDecoder.cleanup()
+                audioPlayer.cleanup()
+
                 val safeId = display.id.replace("'", "").replace("\"", "").replace("\n", "")
                 val script = """
                     python3 - <<'PY'
-                    import os, re, subprocess
+                    import os, re, subprocess, time, urllib.request
                     from pathlib import Path
 
                     target = "$safeId"
@@ -332,6 +345,9 @@ class StreamSession(
                         raise SystemExit("Host config not found")
 
                     txt = conf.read_text(encoding="utf-8", errors="ignore")
+                    port_m = re.search(r"^\s*port\s*=\s*(\d+)", txt, re.M)
+                    port = int(port_m.group(1)) if port_m else 47989
+
                     if re.search(r"^\s*output_name\s*=", txt, re.M):
                         txt = re.sub(r"^\s*output_name\s*=.*$", f"output_name = {target}", txt, flags=re.M)
                     else:
@@ -340,27 +356,74 @@ class StreamSession(
                         txt += f"output_name = {target}\n"
                     conf.write_text(txt, encoding="utf-8")
 
+                    def get_pids():
+                        r = subprocess.run(["pgrep", "-x", "nodedeck-host"], capture_output=True, text=True)
+                        return {p.strip() for p in r.stdout.splitlines() if p.strip()}
+
                     if sysname == "Darwin":
+                        old_pids = get_pids()
                         # NodeDeck.app supervises nodedeck-host and automatically respawns it with intact TCC permissions
                         subprocess.run(["pkill", "-x", "nodedeck-host"], check=False)
                         uid = os.getuid()
                         subprocess.run(["launchctl", "kickstart", "-k", f"gui/{uid}/io.nodedeck.host"], check=False)
+
+                        # Wait until a NEW nodedeck-host PID is running and HTTP serverinfo responds 200
+                        deadline = time.time() + 12.0
+                        ready = False
+                        while time.time() < deadline:
+                            cur_pids = get_pids()
+                            if cur_pids and not cur_pids.issubset(old_pids):
+                                try:
+                                    with urllib.request.urlopen(f"http://127.0.0.1:{port}/serverinfo", timeout=1.0) as resp:
+                                        if resp.status == 200:
+                                            ready = True
+                                            break
+                                except Exception:
+                                    pass
+                            time.sleep(0.25)
+                        if not ready:
+                            raise SystemExit("Timed out waiting for Mac nodedeck-host to restart")
                     else:
                         for svc in ("nodedeck-host", "foundation-sunshine", "sunshine"):
                             r = subprocess.run(["systemctl", "--user", "is-active", "--quiet", svc])
                             if r.returncode == 0:
                                 subprocess.run(["systemctl", "--user", "restart", svc], check=False)
                                 break
+                        time.sleep(0.5)
+                        deadline = time.time() + 10.0
+                        while time.time() < deadline:
+                            try:
+                                with urllib.request.urlopen(f"http://127.0.0.1:{port}/serverinfo", timeout=1.0) as resp:
+                                    if resp.status == 200:
+                                        break
+                            except Exception:
+                                pass
+                            time.sleep(0.25)
                     print("SWITCH_OK")
                     PY
                 """.trimIndent()
-                val res = sshManager.exec(host, allHosts, "/bin/sh -s", stdinText = script, timeoutMs = 10_000)
+                val res = sshManager.exec(host, allHosts, "/bin/sh -s", stdinText = script, timeoutMs = 20_000)
+                if (!MoonlightNative.isCurrent(switchGen)) {
+                    _switchingDisplay.value = false
+                    _displayStatus.value = null
+                    return@launch
+                }
                 if (res.exitCode == 0 && res.stdout.contains("SWITCH_OK")) {
                     _remoteDisplays.value = _remoteDisplays.value.map {
                         it.copy(isSelected = it.id == display.id)
                     }
                     _displayStatus.value = "Switched to ${display.label}, reconnecting…"
-                    delay(1_800)
+                    _state.value = StreamConnectionState.Connecting("Connecting to ${display.label}…")
+
+                    // Extra readiness probe over mesh before launching Moonlight handshake
+                    repeat(6) { attempt ->
+                        val ok = runCatching {
+                            sunshineClient.fetchServerInfo(currentAddress, currentHttpPort)
+                        }.isSuccess
+                        if (ok) return@repeat
+                        if (attempt < 5) delay(400L)
+                    }
+
                     _displayStatus.value = null
                     _switchingDisplay.value = false
                     start(
@@ -373,12 +436,16 @@ class StreamSession(
                         fps = _targetFps.value
                     )
                 } else {
-                    _displayStatus.value = res.stderr.trim().ifBlank { "Display switch failed" }
+                    val err = res.stderr.trim().ifBlank { "Display switch failed" }
+                    _displayStatus.value = err
                     _switchingDisplay.value = false
+                    _state.value = StreamConnectionState.Disconnected(err)
                 }
             } catch (t: Throwable) {
-                _displayStatus.value = t.message ?: "Display switch failed"
+                val err = t.message ?: "Display switch failed"
+                _displayStatus.value = err
                 _switchingDisplay.value = false
+                _state.value = StreamConnectionState.Disconnected(err)
             }
         }
     }
@@ -484,6 +551,7 @@ class StreamSession(
     }
 
     override fun onStageFailed(stageName: String, errorCode: Int) {
+        if (_switchingDisplay.value) return
         _state.value = StreamConnectionState.Disconnected("$stageName failed (error $errorCode)")
     }
 
@@ -492,6 +560,7 @@ class StreamSession(
     }
 
     override fun onConnectionTerminated(errorCode: Int) {
+        if (_switchingDisplay.value) return
         val reason = if (errorCode == 0) null else "Stream terminated (error $errorCode)"
         _state.value = StreamConnectionState.Disconnected(reason)
     }
