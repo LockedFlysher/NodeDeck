@@ -23,12 +23,14 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential pkg-config nasm patchelf curl xz-utils \
-            libsdl2-dev libopus-dev libssl-dev libva-dev libdrm-dev zlib1g-dev
+            build-essential cmake pkg-config nasm patchelf curl xz-utils \
+            libx11-dev libxext-dev libxcursor-dev libxi-dev libxfixes-dev libxrandr-dev \
+            libwayland-dev libxkbcommon-dev libpulse-dev \
+            libopus-dev libssl-dev libva-dev libdrm-dev zlib1g-dev
 
-      - name: Build self-contained static-FFmpeg .deb (glibc 2.35 baseline)
+      - name: Build self-contained static-FFmpeg + static-SDL2 .deb (glibc 2.35 baseline)
         run: |
-          BUNDLE_HOST=0 STATIC_FFMPEG=1 bash linux/build-deb.sh
+          BUNDLE_HOST=0 STATIC_FFMPEG=1 STATIC_SDL2=1 bash linux/build-deb.sh
 
       - name: Upload built .deb artifact
         uses: actions/upload-artifact@v4
@@ -66,8 +68,8 @@ jobs:
               echo "ERROR: missing shared library!" >&2
               exit 1
             fi
-            if readelf -d /opt/nodedeck/nodedeck-stream | grep -qE "libavcodec|libavutil|libswscale"; then
-              echo "ERROR: unexpected dynamic FFmpeg dependency!" >&2
+            if readelf -d /opt/nodedeck/nodedeck-stream | grep -qE "libavcodec|libavutil|libswscale|libSDL2|libopus"; then
+              echo "ERROR: unexpected dynamic multimedia dependency!" >&2
               exit 1
             fi
             python3 -m py_compile /opt/nodedeck/nodedeck_linux.py /opt/nodedeck/nodedeck_mesh_agent.py

@@ -2,19 +2,23 @@
 # Build an All-in-One self-contained Debian/Ubuntu .deb package for NodeDeck Linux
 # (Client + Built-in nodedeck-host + Built-in EasyTier Mesh).
 #
-# Cross-distro portability design:
-# - Statically links a minimal FFmpeg (H.264/HEVC/AV1 + VAAPI + CUDA/NVDEC via dlopen)
+# Cross-distro & zero-extra-deps portability design:
+# - Statically links minimal FFmpeg 7.1.1 (H.264/HEVC/AV1 + VAAPI + CUDA/NVDEC via dlopen)
 #   into nodedeck-stream -> ZERO libavcodecXX / libavutilXX / libswscaleXX SONAME lock-in.
-# - Bundles libminiupnpc.so.* into /opt/nodedeck/host/lib and stamps an absolute+relative
-#   RPATH (/opt/nodedeck/host/lib:$ORIGIN/../lib) on nodedeck-host so it resolves even
-#   under AT_SECURE=1 (cap_sys_admin+p) -> ZERO libminiupnpcXX SONAME lock-in.
+# - Statically links SDL2 (with X11/Wayland/PulseAudio runtime dlopen) + libopus.a
+#   into nodedeck-stream -> ZERO libsdl2-2.0-0 / libopus0 external dependency!
+# - Bundles libminiupnpc, libopus, libnuma, libevdev, libva, libva-drm into private lib dirs
+#   with absolute+relative RUNPATH (/opt/nodedeck[/host]/lib:$ORIGIN[/..]/lib) so binaries
+#   resolve cleanly even under AT_SECURE=1 (cap_sys_admin+p).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VERSION="${VERSION:-2.1.0}"
 BUNDLE_HOST="${BUNDLE_HOST:-1}"
 STATIC_FFMPEG="${STATIC_FFMPEG:-1}"
+STATIC_SDL2="${STATIC_SDL2:-1}"
 FFMPEG_PREFIX="${FFMPEG_PREFIX:-$ROOT/.build/ffmpeg-static}"
+SDL2_PREFIX="${SDL2_PREFIX:-$ROOT/.build/sdl2-static}"
 if [[ -z "${HOST_SRC_DIR:-}" ]]; then
   if [[ -x "$ROOT/.build/host-linux/bin/nodedeck-host" ]]; then
     HOST_SRC_DIR="$ROOT/.build/host-linux"
@@ -31,6 +35,7 @@ rm -rf "$STAGE"
 mkdir -p \
   "$STAGE/DEBIAN" \
   "$STAGE/opt/nodedeck" \
+  "$STAGE/opt/nodedeck/lib" \
   "$STAGE/opt/nodedeck/easytier" \
   "$STAGE/usr/local/bin" \
   "$STAGE/usr/lib/systemd/system" \
@@ -63,6 +68,24 @@ else
   read -r -a FFMPEG_LIBS <<< "$(pkg-config --libs libavcodec libavutil libswscale)"
 fi
 
+if [[ "$STATIC_SDL2" == "1" ]]; then
+  PREFIX="$SDL2_PREFIX" bash "$ROOT/linux/build-sdl2-static.sh"
+  SDL_CFLAGS="-I${SDL2_PREFIX}/include -I${SDL2_PREFIX}/include/SDL2 -D_REENTRANT"
+  SDL_LIBS=("${SDL2_PREFIX}/lib/libSDL2.a" -ldl -lpthread -lm)
+else
+  SDL_CFLAGS="$(pkg-config --cflags sdl2)"
+  read -r -a SDL_LIBS <<< "$(pkg-config --libs sdl2)"
+fi
+
+OPUS_STATIC_A="$(find /usr/lib /lib -name libopus.a 2>/dev/null | head -n 1 || true)"
+if [[ -n "$OPUS_STATIC_A" && -f "$OPUS_STATIC_A" ]]; then
+  OPUS_CFLAGS="$(pkg-config --cflags opus)"
+  OPUS_LIBS=("$OPUS_STATIC_A")
+else
+  OPUS_CFLAGS="$(pkg-config --cflags opus)"
+  read -r -a OPUS_LIBS <<< "$(pkg-config --libs opus)"
+fi
+
 "${CC:-gcc}" -O2 -std=gnu11 \
   -DHAS_FCNTL=1 -DHAS_IOCTL=1 -DHAS_POLL=1 \
   -DHAS_GETNAMEINFO=1 -DHAS_GETADDRINFO=1 -DHAS_GETHOSTBYNAME_R=1 -DHAS_GETHOSTBYADDR_R=1 \
@@ -73,17 +96,38 @@ fi
   -I"$ROOT/Sources/CMoonlightCommon/nanors" \
   -I"$ROOT/Sources/CMoonlightCommon/nanors/deps" \
   -I"$ROOT/Sources/CMoonlightCommon/nanors/deps/obl" \
-  $FFMPEG_CFLAGS \
+  $FFMPEG_CFLAGS $SDL_CFLAGS $OPUS_CFLAGS $(pkg-config --cflags libcrypto) \
   "$ROOT/linux/nodedeck_stream.c" \
   "${COMMON_SRCS[@]}" \
   "$ROOT"/Sources/CMoonlightCommon/enet/{callbacks,compress,host,list,packet,peer,protocol,unix}.c \
   "$ROOT"/Sources/CMoonlightCommon/nanors/rs.c \
   "$ROOT"/Sources/CMoonlightCommon/nanors/deps/obl/{oblas_common,oblas_lite}.c \
-  $(pkg-config --cflags --libs sdl2 opus libcrypto) \
+  "${SDL_LIBS[@]}" \
+  "${OPUS_LIBS[@]}" \
+  $(pkg-config --libs libcrypto) \
   "${FFMPEG_LIBS[@]}" \
-  -lpthread -lm \
+  -Wl,-rpath,'/opt/nodedeck/lib:$ORIGIN/lib' \
+  -lpthread -lm -ldl \
   -o "$STAGE/opt/nodedeck/nodedeck-stream"
 strip --strip-unneeded "$STAGE/opt/nodedeck/nodedeck-stream" 2>/dev/null || true
+
+bundle_so() {
+  local soname="$1"
+  local dest_dir="$2"
+  if [[ -f "$dest_dir/$soname" ]]; then
+    return 0
+  fi
+  local found
+  found="$(ldconfig -p 2>/dev/null | awk -v lib="$soname" '$1 == lib {print $NF; exit}' || true)"
+  if [[ -n "$found" && -f "$found" ]]; then
+    cp -L "$found" "$dest_dir/$soname"
+    chmod 0644 "$dest_dir/$soname"
+  fi
+}
+
+# Bundle tiny VAAPI glue libs for nodedeck-stream so libva2/libva-drm2 aren't required externally
+bundle_so "libva.so.2" "$STAGE/opt/nodedeck/lib"
+bundle_so "libva-drm.so.2" "$STAGE/opt/nodedeck/lib"
 
 install -m 0755 "$ROOT/linux/nodedeck_linux.py" "$STAGE/opt/nodedeck/nodedeck_linux.py"
 install -m 0755 "$ROOT/linux/nodedeck_mesh_agent.py" "$STAGE/opt/nodedeck/nodedeck_mesh_agent.py"
@@ -131,19 +175,13 @@ if [[ "$BUNDLE_HOST" == "1" ]]; then
     cp -a "$HOST_SRC_DIR/." "$STAGE/opt/nodedeck/host/"
     chmod 0755 "$STAGE/opt/nodedeck/host/bin/nodedeck-host"
 
-    # Bundle distro-volatile libminiupnpc.so.* alongside nodedeck-host
+    # Bundle all non-default tiny runtime libs alongside nodedeck-host (~700 KB total)
     MINI_SONAME="$(readelf -d "$STAGE/opt/nodedeck/host/bin/nodedeck-host" 2>/dev/null \
-      | sed -n 's/.*Shared library: \[\(libminiupnpc\.so\.[0-9.]*\)\].*/\1/p' | head -n 1 || true)"
-    if [[ -z "$MINI_SONAME" ]]; then
-      MINI_SONAME="$(readelf -d "$STAGE/opt/nodedeck/host/bin/nodedeck-host" 2>/dev/null \
-        | grep -oE 'libminiupnpc\.so\.[0-9.]+' | head -n 1 || true)"
-    fi
-    if [[ -n "$MINI_SONAME" && ! -f "$STAGE/opt/nodedeck/host/lib/$MINI_SONAME" ]]; then
-      MINI_PATH="$(ldconfig -p 2>/dev/null | awk -v lib="$MINI_SONAME" '$1 == lib {print $NF; exit}' || true)"
-      if [[ -n "$MINI_PATH" && -f "$MINI_PATH" ]]; then
-        cp -L "$MINI_PATH" "$STAGE/opt/nodedeck/host/lib/$MINI_SONAME"
-      fi
-    fi
+      | grep -oE 'libminiupnpc\.so\.[0-9.]+' | head -n 1 || true)"
+    [[ -n "$MINI_SONAME" ]] && bundle_so "$MINI_SONAME" "$STAGE/opt/nodedeck/host/lib"
+    for extra_so in libopus.so.0 libnuma.so.1 libevdev.so.2 libva.so.2 libva-drm.so.2; do
+      bundle_so "$extra_so" "$STAGE/opt/nodedeck/host/lib"
+    done
 
     # Stamp absolute + relative RUNPATH so /opt/nodedeck/host/lib resolves even with cap_sys_admin+p (AT_SECURE=1)
     PATCHELF_BIN="$(ensure_patchelf || true)"
@@ -154,8 +192,8 @@ if [[ "$BUNDLE_HOST" == "1" ]]; then
       exit 1
     fi
 
-    # Only decade-stable system libraries (ZERO libminiupnpcXX SONAME lock-in!)
-    HOST_DEPENDS=", libnuma1, libevdev2, libpulse0, libcurl4t64 | libcurl4, libcap2, libwayland-client0"
+    # Only base libraries preinstalled on standard Ubuntu/Debian desktops
+    HOST_DEPENDS=", libpulse0, libcurl4t64 | libcurl4, libcap2, libwayland-client0"
 
     cat > "$STAGE/usr/lib/systemd/user/nodedeck-host.service" <<'EOF'
 [Unit]
@@ -177,11 +215,18 @@ EOF
   fi
 fi
 
-# Self-containment audit: verify zero volatile FFmpeg/miniupnpc external lock-in
+# Self-containment audit
 echo "=== Auditing dynamic library dependencies ==="
 if [[ "$STATIC_FFMPEG" == "1" ]]; then
   if readelf -d "$STAGE/opt/nodedeck/nodedeck-stream" | grep -qE 'libavcodec\.so|libavutil\.so|libswscale\.so'; then
     echo "ERROR: nodedeck-stream still dynamically links system FFmpeg!" >&2
+    readelf -d "$STAGE/opt/nodedeck/nodedeck-stream" | grep NEEDED >&2
+    exit 1
+  fi
+fi
+if [[ "$STATIC_SDL2" == "1" ]]; then
+  if readelf -d "$STAGE/opt/nodedeck/nodedeck-stream" | grep -qE 'libSDL2'; then
+    echo "ERROR: nodedeck-stream still dynamically links libSDL2!" >&2
     readelf -d "$STAGE/opt/nodedeck/nodedeck-stream" | grep NEEDED >&2
     exit 1
   fi
@@ -215,9 +260,12 @@ Categories=Network;System;Utility;
 StartupWMClass=nodedeck_linux.py
 EOF
 
-FFMPEG_DEPENDS=""
+EXTRA_CLIENT_DEPENDS=""
+if [[ "$STATIC_SDL2" != "1" ]]; then
+  EXTRA_CLIENT_DEPENDS="${EXTRA_CLIENT_DEPENDS}, libsdl2-2.0-0"
+fi
 if [[ "$STATIC_FFMPEG" != "1" ]]; then
-  FFMPEG_DEPENDS=", libavcodec61 | libavcodec60 | libavcodec-extra60 | libavcodec59, libavutil59 | libavutil58 | libavutil57, libswscale8 | libswscale7 | libswscale6"
+  EXTRA_CLIENT_DEPENDS="${EXTRA_CLIENT_DEPENDS}, libavcodec61 | libavcodec60 | libavcodec-extra60 | libavcodec59, libavutil59 | libavutil58 | libavutil57, libswscale8 | libswscale7 | libswscale6"
 fi
 
 cat > "$STAGE/DEBIAN/control" <<EOF
@@ -227,10 +275,10 @@ Section: net
 Priority: optional
 Architecture: ${ARCH}
 Maintainer: NodeDeck Contributors
-Depends: python3, python3-gi, gir1.2-gtk-3.0, libsdl2-2.0-0, libopus0, libssl3t64 | libssl3, libva2, libva-drm2, libdrm2, openssh-client, openssl${FFMPEG_DEPENDS}${HOST_DEPENDS}
+Depends: python3, python3-gi, gir1.2-gtk-3.0, libssl3t64 | libssl3, libdrm2, openssh-client, openssl${EXTRA_CLIENT_DEPENDS}${HOST_DEPENDS}
 Description: NodeDeck All-in-One SSH Manager, Remote Desktop Client & Built-in Host
  Zero-cloud SSH workstation manager with live CPU/GPU telemetry, port forwarding,
- self-contained hardware-accelerated Moonlight streaming client (static FFmpeg),
+ self-contained hardware-accelerated Moonlight streaming client (static FFmpeg + SDL2 + Opus),
  and built-in Sunshine host (nodedeck-host) with bundled runtime dependencies.
 EOF
 
