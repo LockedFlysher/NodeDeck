@@ -329,7 +329,7 @@ class StreamSession(
                 val safeId = display.id.replace("'", "").replace("\"", "").replace("\n", "")
                 val script = """
                     python3 - <<'PY'
-                    import os, re, subprocess, time, urllib.request
+                    import http.client, os, re, subprocess, time
                     from pathlib import Path
 
                     target = "$safeId"
@@ -360,27 +360,39 @@ class StreamSession(
                         r = subprocess.run(["pgrep", "-x", "nodedeck-host"], capture_output=True, text=True)
                         return {p.strip() for p in r.stdout.splitlines() if p.strip()}
 
+                    def probe_local_serverinfo(p):
+                        # Direct http.client bypasses macOS/Linux system HTTP proxies completely
+                        conn = None
+                        try:
+                            conn = http.client.HTTPConnection("127.0.0.1", p, timeout=1.0)
+                            conn.request("GET", "/serverinfo")
+                            resp = conn.getresponse()
+                            resp.read()
+                            return resp.status == 200
+                        except Exception:
+                            return False
+                        finally:
+                            if conn is not None:
+                                try:
+                                    conn.close()
+                                except Exception:
+                                    pass
+
                     if sysname == "Darwin":
                         old_pids = get_pids()
                         # NodeDeck.app supervises nodedeck-host and automatically respawns it with intact TCC permissions
                         subprocess.run(["pkill", "-x", "nodedeck-host"], check=False)
-                        uid = os.getuid()
-                        subprocess.run(["launchctl", "kickstart", "-k", f"gui/{uid}/io.nodedeck.host"], check=False)
 
-                        # Wait until a NEW nodedeck-host PID is running and HTTP serverinfo responds 200
-                        deadline = time.time() + 12.0
+                        # Wait until a NEW nodedeck-host PID is running and direct /serverinfo returns 200
+                        deadline = time.time() + 10.0
                         ready = False
                         while time.time() < deadline:
                             cur_pids = get_pids()
                             if cur_pids and not cur_pids.issubset(old_pids):
-                                try:
-                                    with urllib.request.urlopen(f"http://127.0.0.1:{port}/serverinfo", timeout=1.0) as resp:
-                                        if resp.status == 200:
-                                            ready = True
-                                            break
-                                except Exception:
-                                    pass
-                            time.sleep(0.25)
+                                if probe_local_serverinfo(port):
+                                    ready = True
+                                    break
+                            time.sleep(0.2)
                         if not ready:
                             raise SystemExit("Timed out waiting for Mac nodedeck-host to restart")
                     else:
@@ -389,16 +401,12 @@ class StreamSession(
                             if r.returncode == 0:
                                 subprocess.run(["systemctl", "--user", "restart", svc], check=False)
                                 break
-                        time.sleep(0.5)
+                        time.sleep(0.4)
                         deadline = time.time() + 10.0
                         while time.time() < deadline:
-                            try:
-                                with urllib.request.urlopen(f"http://127.0.0.1:{port}/serverinfo", timeout=1.0) as resp:
-                                    if resp.status == 200:
-                                        break
-                            except Exception:
-                                pass
-                            time.sleep(0.25)
+                            if probe_local_serverinfo(port):
+                                break
+                            time.sleep(0.2)
                     print("SWITCH_OK")
                     PY
                 """.trimIndent()

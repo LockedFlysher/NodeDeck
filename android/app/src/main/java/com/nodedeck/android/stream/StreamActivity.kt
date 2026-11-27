@@ -32,6 +32,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -1828,11 +1829,12 @@ private fun StreamScreen(
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(horizontal = 14.dp, vertical = 10.dp),
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             OutlinedButton(
                                 modifier = Modifier.weight(1f),
+                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 8.dp),
                                 onClick = {
                                     showSidebar = false
                                     onReconnect()
@@ -1842,13 +1844,15 @@ private fun StreamScreen(
                             }
                             Button(
                                 modifier = Modifier.weight(1f),
+                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 8.dp),
                                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF344352)),
                                 onClick = { onDisconnect(false) }
                             ) {
                                 Text(AppLocalization.t("断开", "Disconnect", lang), fontSize = 12.sp, maxLines = 1, softWrap = false)
                             }
                             Button(
-                                modifier = Modifier.weight(1f),
+                                modifier = Modifier.weight(0.9f),
+                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 8.dp),
                                 colors = ButtonDefaults.buttonColors(containerColor = NodeDeckColors.Offline),
                                 onClick = { onDisconnect(true) }
                             ) {
