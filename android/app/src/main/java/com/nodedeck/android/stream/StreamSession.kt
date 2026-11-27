@@ -18,6 +18,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -29,6 +30,14 @@ sealed class StreamConnectionState {
     data object Streaming : StreamConnectionState()
     data class Disconnected(val reason: String?) : StreamConnectionState()
 }
+
+data class RemoteDisplayInfo(
+    val id: String,
+    val label: String,
+    val resolution: String,
+    val isPrimary: Boolean,
+    val isSelected: Boolean
+)
 
 class StreamSession(
     private val context: Context,
@@ -70,6 +79,18 @@ class StreamSession(
     private val _clipboardStatus = MutableStateFlow<String?>(null)
     val clipboardStatus: StateFlow<String?> = _clipboardStatus.asStateFlow()
 
+    private val _audioMuted = MutableStateFlow(false)
+    val audioMuted: StateFlow<Boolean> = _audioMuted.asStateFlow()
+
+    private val _remoteDisplays = MutableStateFlow<List<RemoteDisplayInfo>>(emptyList())
+    val remoteDisplays: StateFlow<List<RemoteDisplayInfo>> = _remoteDisplays.asStateFlow()
+
+    private val _switchingDisplay = MutableStateFlow(false)
+    val switchingDisplay: StateFlow<Boolean> = _switchingDisplay.asStateFlow()
+
+    private val _displayStatus = MutableStateFlow<String?>(null)
+    val displayStatus: StateFlow<String?> = _displayStatus.asStateFlow()
+
     private val videoDecoder = MediaCodecVideoDecoder { newStats ->
         _stats.value = newStats
     }
@@ -95,6 +116,11 @@ class StreamSession(
     fun setTouchpadMode(enabled: Boolean) {
         _touchpadMode.value = enabled
         store.setTouchpadMode(enabled)
+    }
+
+    fun setAudioMuted(muted: Boolean) {
+        _audioMuted.value = muted
+        audioPlayer.setMuted(muted)
     }
 
     fun start(
@@ -124,6 +150,9 @@ class StreamSession(
 
         val bitrateKbps = StreamQualityMath.recommendedBitrateKbps(width, height, fps)
         _state.value = StreamConnectionState.Connecting("Negotiating with $address:$httpPort…")
+        if (host != null && _remoteDisplays.value.isEmpty()) {
+            loadRemoteDisplays()
+        }
 
         launchJob = scope.launch(Dispatchers.IO) {
             try {
@@ -180,6 +209,176 @@ class StreamSession(
         if (rate.fps == _targetFps.value) return
         if (currentAddress.isBlank()) return
         start(currentHost, allHosts, currentAddress, currentHttpPort, _targetWidth.value, _targetHeight.value, rate.fps)
+    }
+
+    fun loadRemoteDisplays() {
+        val host = currentHost ?: return
+        scope.launch(Dispatchers.IO) {
+            val script = """
+                python3 - <<'PY'
+                import json, os, re, subprocess
+                from pathlib import Path
+
+                sysname = os.uname().sysname
+                selected = ""
+                if sysname == "Darwin":
+                    conf = Path.home() / "Library/Application Support/NodeDeck/host/host.conf"
+                    if conf.exists():
+                        m = re.search(r"^\s*output_name\s*=\s*(.+)$", conf.read_text(errors="ignore"), re.M)
+                        if m: selected = m.group(1).strip()
+                    log_path = Path.home() / "Library/Logs/nodedeck-host.log"
+                    displays = []
+                    if log_path.exists():
+                        txt = log_path.read_text(errors="ignore")
+                        marker = "Currently available display devices:"
+                        idx = txt.rfind(marker)
+                        if idx >= 0:
+                            chunk = txt[idx + len(marker):]
+                            s = chunk.find("[")
+                            if s >= 0:
+                                depth, end = 0, -1
+                                for i, ch in enumerate(chunk[s:]):
+                                    if ch == "[": depth += 1
+                                    elif ch == "]":
+                                        depth -= 1
+                                        if depth == 0:
+                                            end = s + i + 1
+                                            break
+                                if end > s:
+                                    arr = json.loads(chunk[s:end])
+                                    for item in arr:
+                                        name = str(item.get("display_name") or item.get("friendly_name") or "")
+                                        info = item.get("info") or {}
+                                        res = info.get("resolution") or {}
+                                        w, h = res.get("width", 0), res.get("height", 0)
+                                        prim = bool(info.get("primary"))
+                                        displays.append((name, f"Display {name}", f"{w}x{h}" if w and h else "", prim))
+                    for d_id, lbl, res_s, prim in displays:
+                        sel = (selected == d_id) or (not selected and prim)
+                        print(f"DISP|{d_id}|{lbl}|{res_s}|{1 if prim else 0}|{1 if sel else 0}")
+                else:
+                    for cpath in (Path.home() / ".config/nodedeck/host/host.conf", Path.home() / ".config/sunshine/sunshine.conf"):
+                        if cpath.exists():
+                            m = re.search(r"^\s*output_name\s*=\s*(.+)$", cpath.read_text(errors="ignore"), re.M)
+                            if m:
+                                selected = m.group(1).strip()
+                                break
+                    lines = []
+                    for cand_disp in (os.environ.get("DISPLAY", ""), ":0", ":99", ":1"):
+                        if not cand_disp:
+                            continue
+                        env = os.environ.copy()
+                        env["DISPLAY"] = cand_disp
+                        out = subprocess.run(["xrandr", "--listmonitors"], env=env, capture_output=True, text=True).stdout
+                        found = [ln.strip() for ln in out.splitlines() if ":" in ln and not ln.startswith("Monitors:")]
+                        if found:
+                            lines = found
+                            break
+                    for idx, ln in enumerate(lines):
+                        parts = ln.split()
+                        if len(parts) >= 4:
+                            d_id = parts[-1]
+                            prim = "*" in parts[1]
+                            geom = re.sub(r"/\d+", "", parts[2]).split("+")[0]
+                            sel = (selected == d_id) or (selected == str(idx)) or (not selected and prim)
+                            print(f"DISP|{d_id}|{d_id}|{geom}|{1 if prim else 0}|{1 if sel else 0}")
+                PY
+            """.trimIndent()
+
+            val res = runCatching { sshManager.exec(host, allHosts, "/bin/sh -s", stdinText = script, timeoutMs = 8_000) }.getOrNull()
+            if (res != null && res.exitCode == 0) {
+                val parsed = res.stdout.lines()
+                    .filter { it.startsWith("DISP|") }
+                    .mapNotNull { line ->
+                        val p = line.split("|")
+                        if (p.size >= 6) {
+                            RemoteDisplayInfo(
+                                id = p[1],
+                                label = p[2],
+                                resolution = p[3],
+                                isPrimary = p[4] == "1",
+                                isSelected = p[5] == "1"
+                            )
+                        } else null
+                    }
+                _remoteDisplays.value = parsed
+            }
+        }
+    }
+
+    fun switchRemoteDisplay(display: RemoteDisplayInfo) {
+        val host = currentHost ?: return
+        if (_switchingDisplay.value) return
+        _switchingDisplay.value = true
+        _displayStatus.value = "Switching to ${display.label}…"
+        scope.launch(Dispatchers.IO) {
+            try {
+                val safeId = display.id.replace("'", "").replace("\"", "").replace("\n", "")
+                val script = """
+                    python3 - <<'PY'
+                    import os, re, subprocess
+                    from pathlib import Path
+
+                    target = "$safeId"
+                    sysname = os.uname().sysname
+                    if sysname == "Darwin":
+                        conf = Path.home() / "Library/Application Support/NodeDeck/host/host.conf"
+                    else:
+                        c1 = Path.home() / ".config/nodedeck/host/host.conf"
+                        c2 = Path.home() / ".config/sunshine/sunshine.conf"
+                        conf = c1 if c1.exists() else c2
+
+                    if not conf.exists():
+                        raise SystemExit("Host config not found")
+
+                    txt = conf.read_text(encoding="utf-8", errors="ignore")
+                    if re.search(r"^\s*output_name\s*=", txt, re.M):
+                        txt = re.sub(r"^\s*output_name\s*=.*$", f"output_name = {target}", txt, flags=re.M)
+                    else:
+                        if txt and not txt.endswith("\n"):
+                            txt += "\n"
+                        txt += f"output_name = {target}\n"
+                    conf.write_text(txt, encoding="utf-8")
+
+                    if sysname == "Darwin":
+                        uid = os.getuid()
+                        subprocess.run(["launchctl", "kickstart", "-k", f"gui/{uid}/io.nodedeck.host"], check=False)
+                    else:
+                        for svc in ("nodedeck-host", "foundation-sunshine", "sunshine"):
+                            r = subprocess.run(["systemctl", "--user", "is-active", "--quiet", svc])
+                            if r.returncode == 0:
+                                subprocess.run(["systemctl", "--user", "restart", svc], check=False)
+                                break
+                    print("SWITCH_OK")
+                    PY
+                """.trimIndent()
+                val res = sshManager.exec(host, allHosts, "/bin/sh -s", stdinText = script, timeoutMs = 10_000)
+                if (res.exitCode == 0 && res.stdout.contains("SWITCH_OK")) {
+                    _remoteDisplays.value = _remoteDisplays.value.map {
+                        it.copy(isSelected = it.id == display.id)
+                    }
+                    _displayStatus.value = "Switched to ${display.label}, reconnecting…"
+                    delay(1_800)
+                    _displayStatus.value = null
+                    _switchingDisplay.value = false
+                    start(
+                        host = currentHost,
+                        hosts = allHosts,
+                        address = currentAddress,
+                        httpPort = currentHttpPort,
+                        width = _targetWidth.value,
+                        height = _targetHeight.value,
+                        fps = _targetFps.value
+                    )
+                } else {
+                    _displayStatus.value = res.stderr.trim().ifBlank { "Display switch failed" }
+                    _switchingDisplay.value = false
+                }
+            } catch (t: Throwable) {
+                _displayStatus.value = t.message ?: "Display switch failed"
+                _switchingDisplay.value = false
+            }
+        }
     }
 
     fun togglePrivacyScreen() {

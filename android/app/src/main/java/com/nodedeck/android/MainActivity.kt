@@ -1,11 +1,12 @@
 package com.nodedeck.android
 
-import android.net.VpnService
+import android.app.Activity
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -38,18 +39,34 @@ private sealed class AppScreen {
 
 class MainActivity : ComponentActivity() {
     private val viewModel: MainViewModel by viewModels()
+    private var promptedVpnConsent = false
+
+    private val vpnConsentLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            MeshRuntimeController.start(this)
+        }
+    }
+
+    private fun ensureAlwaysOnMeshRunning() {
+        val store = NodeDeckApp.from(this).store
+        if (!viewModel.accountSession.value.isLoggedIn || !store.isMeshAlwaysOn()) return
+        val st = MeshRuntimeController.snapshot.value.state
+        if (st == MeshConnectionState.CONNECTED || st == MeshConnectionState.CONNECTING) return
+        val prepareIntent = MeshRuntimeController.prepareVpnIntent(this)
+        if (prepareIntent == null) {
+            MeshRuntimeController.start(this)
+        } else if (!promptedVpnConsent) {
+            promptedVpnConsent = true
+            vpnConsentLauncher.launch(prepareIntent)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-
-        // Auto-resume built-in EasyTier VPN when already logged in and user has previously granted VPN consent
-        if (viewModel.accountSession.value.isLoggedIn &&
-            MeshRuntimeController.snapshot.value.state == MeshConnectionState.STOPPED &&
-            MeshRuntimeController.prepareVpnIntent(this) == null
-        ) {
-            MeshRuntimeController.start(this)
-        }
+        ensureAlwaysOnMeshRunning()
 
         setContent {
             NodeDeckTheme {
@@ -197,5 +214,10 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        ensureAlwaysOnMeshRunning()
     }
 }

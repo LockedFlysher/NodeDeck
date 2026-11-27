@@ -115,6 +115,12 @@ class SecureStore(context: Context) {
         prefs.edit().putBoolean("clipboard_auto_sync", enabled).apply()
     }
 
+    fun isMeshAlwaysOn(): Boolean = prefs.getBoolean("mesh_always_on", true)
+
+    fun setMeshAlwaysOn(enabled: Boolean) {
+        prefs.edit().putBoolean("mesh_always_on", enabled).apply()
+    }
+
     private inline fun <reified T> readJsonFile(file: File): T? {
         if (!file.exists()) return null
         return runCatching { json.decodeFromString<T>(file.readText()) }.getOrNull()

@@ -16,7 +16,15 @@ class OpusAudioPlayer {
     private var audioTrack: AudioTrack? = null
     private var outputThread: Thread? = null
     @Volatile private var running = false
+    @Volatile private var muted = false
     private var ptsUs = 0L
+
+    fun setMuted(muted: Boolean) {
+        this.muted = muted
+        synchronized(lock) {
+            runCatching { audioTrack?.setVolume(if (muted) 0f else 1f) }
+        }
+    }
 
     fun init(sampleRate: Int, channelCount: Int, samplesPerFrame: Int): Int {
         synchronized(lock) {
@@ -56,6 +64,7 @@ class OpusAudioPlayer {
                     trackBuilder.setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
                 }
                 val track = trackBuilder.build()
+                track.setVolume(if (muted) 0f else 1f)
                 track.play()
 
                 codec = mc

@@ -23,9 +23,11 @@ import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -42,18 +44,23 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.material.icons.filled.AspectRatio
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ContentPaste
+import androidx.compose.material.icons.filled.DesktopWindows
 import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -354,28 +361,11 @@ private class StreamTouchInputController(
         val (videoW, videoH) = getVideoDims()
         val viewW = view.width.coerceAtLeast(1).toFloat()
         val viewH = view.height.coerceAtLeast(1).toFloat()
-        val videoAspect = videoW.toFloat() / videoH.coerceAtLeast(1).toFloat()
-        val viewAspect = viewW / viewH
 
-        val renderW: Float
-        val renderH: Float
-        val offsetX: Float
-        val offsetY: Float
-        if (viewAspect > videoAspect) {
-            renderH = viewH
-            renderW = viewH * videoAspect
-            offsetX = (viewW - renderW) / 2f
-            offsetY = 0f
-        } else {
-            renderW = viewW
-            renderH = viewW / videoAspect
-            offsetX = 0f
-            offsetY = (viewH - renderH) / 2f
-        }
-
+        // touchView is sized identically to the aspect-ratio-fitted SurfaceView, so 1:1 normalized mapping is exact
         fun mapCoords(x: Float, y: Float): Pair<Int, Int> {
-            val nx = ((x - offsetX) / renderW.coerceAtLeast(1f)).coerceIn(0f, 1f)
-            val ny = ((y - offsetY) / renderH.coerceAtLeast(1f)).coerceIn(0f, 1f)
+            val nx = (x / viewW).coerceIn(0f, 1f)
+            val ny = (y / viewH).coerceIn(0f, 1f)
             return (nx * videoW).roundToInt() to (ny * videoH).roundToInt()
         }
 
@@ -431,9 +421,23 @@ private fun StreamScreen(
     val touchpadMode by session.touchpadMode.collectAsState()
     val privacyEnabled by session.privacyScreenEnabled.collectAsState()
     val clipboardStatus by session.clipboardStatus.collectAsState()
+    val audioMuted by session.audioMuted.collectAsState()
+    val remoteDisplays by session.remoteDisplays.collectAsState()
+    val switchingDisplay by session.switchingDisplay.collectAsState()
+    val displayStatus by session.displayStatus.collectAsState()
 
     var showControlMenu by remember { mutableStateOf(false) }
     var showKeyboardDock by remember { mutableStateOf(false) }
+    var fillCropMode by remember { mutableStateOf(false) }
+    var zoomScale by remember { mutableFloatStateOf(1f) }
+
+    // Resolve actual decoded aspect ratio (falls back to target stream dimensions)
+    val (videoW, videoH) = remember(stats.resolution, targetWidth, targetHeight) {
+        val match = Regex("""(\d+)\s*[x×]\s*(\d+)""").find(stats.resolution)
+        val w = match?.groupValues?.getOrNull(1)?.toIntOrNull()?.takeIf { it > 0 } ?: targetWidth.coerceAtLeast(1)
+        val h = match?.groupValues?.getOrNull(2)?.toIntOrNull()?.takeIf { it > 0 } ?: targetHeight.coerceAtLeast(1)
+        w to h
+    }
 
     BackHandler {
         if (showControlMenu) {
@@ -452,14 +456,40 @@ private fun StreamScreen(
     var orbOffsetX by remember { mutableFloatStateOf(24f) }
     var orbOffsetY by remember { mutableFloatStateOf(120f) }
 
-    Box(
+    BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)
     ) {
-        // Hardware-accelerated SurfaceView + low-latency multi-touch overlay
+        val viewW = maxWidth
+        val viewH = maxHeight
+        val videoAspect = videoW.toFloat() / videoH.coerceAtLeast(1).toFloat()
+        val viewAspect = viewW.value / viewH.value.coerceAtLeast(1f)
+        val (surfaceW, surfaceH) = if (!fillCropMode) {
+            // Original aspect ratio (Fit with black letterbox/pillarbox, zero horizontal stretch)
+            if (viewAspect > videoAspect) {
+                (viewH * videoAspect) to viewH
+            } else {
+                viewW to (viewW / videoAspect)
+            }
+        } else {
+            // Uniform scale to cover full screen without aspect distortion
+            if (viewAspect > videoAspect) {
+                viewW to (viewW / videoAspect)
+            } else {
+                (viewH * videoAspect) to viewH
+            }
+        }
+
+        // Aspect-ratio-exact SurfaceView + aligned multi-touch overlay
         AndroidView(
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier
+                .align(Alignment.Center)
+                .size(surfaceW, surfaceH)
+                .graphicsLayer(
+                    scaleX = zoomScale,
+                    scaleY = zoomScale
+                ),
             factory = { ctx ->
                 val container = FrameLayout(ctx)
                 val surfaceView = SurfaceView(ctx).apply {
@@ -480,7 +510,12 @@ private fun StreamScreen(
                     StreamTouchInputController(
                         view = touchView,
                         isTouchpadMode = { session.touchpadMode.value },
-                        getVideoDims = { session.targetWidth.value to session.targetHeight.value }
+                        getVideoDims = {
+                            val m = Regex("""(\d+)\s*[x×]\s*(\d+)""").find(session.stats.value.resolution)
+                            val w = m?.groupValues?.getOrNull(1)?.toIntOrNull()?.takeIf { it > 0 } ?: session.targetWidth.value
+                            val h = m?.groupValues?.getOrNull(2)?.toIntOrNull()?.takeIf { it > 0 } ?: session.targetHeight.value
+                            w to h
+                        }
                     )
                 )
                 container.addView(
@@ -659,40 +694,42 @@ private fun StreamScreen(
             )
         }
 
-        // Floating Control Panel Overlay
+        // Right-Edge Slide-Over Control Sidebar
         if (showControlMenu) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(Color(0x66000000))
+                    .background(Color(0x55000000))
                     .clickable { showControlMenu = false },
-                contentAlignment = Alignment.Center
+                contentAlignment = Alignment.CenterEnd
             ) {
                 Surface(
                     modifier = Modifier
-                        .widthIn(min = 320.dp, max = 520.dp)
-                        .padding(16.dp)
+                        .width(340.dp)
+                        .fillMaxHeight()
                         .clickable(enabled = false) {},
-                    shape = RoundedCornerShape(18.dp),
-                    color = Color(0xF2141B22),
-                    tonalElevation = 8.dp
+                    shape = RoundedCornerShape(topStart = 20.dp, bottomStart = 20.dp),
+                    color = Color(0xF5121820),
+                    tonalElevation = 10.dp
                 ) {
                     Column(
                         modifier = Modifier
-                            .padding(16.dp)
+                            .fillMaxSize()
+                            .padding(horizontal = 16.dp, vertical = 14.dp)
                             .verticalScroll(rememberScrollState()),
-                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                        verticalArrangement = Arrangement.spacedBy(11.dp)
                     ) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Column {
+                            Column(modifier = Modifier.weight(1f)) {
                                 Text(
                                     text = title.ifBlank { "NodeDeck Stream" },
                                     style = MaterialTheme.typography.titleMedium,
-                                    color = Color.White
+                                    color = Color.White,
+                                    maxLines = 1
                                 )
                                 Text(
                                     text = "${stats.fps}/${targetFps} FPS · ${String.format("%.1f", stats.bitrateMbps)} Mbps · RTT ${stats.networkRttMs}ms",
@@ -705,7 +742,135 @@ private fun StreamScreen(
                             }
                         }
 
-                        HorizontalDivider(color = Color(0xFF283542))
+                        HorizontalDivider(color = Color(0xFF263340))
+
+                        // Multi-Display Switcher (macOS & Linux hosts over SSH)
+                        if (session.hasSshHost) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(
+                                        Icons.Default.DesktopWindows,
+                                        contentDescription = null,
+                                        tint = NodeDeckColors.AccentLight,
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                    Text(
+                                        text = AppLocalization.t("多显示器切换", "Displays", lang),
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = Color(0xFF9EB3C2)
+                                    )
+                                }
+                                IconButton(
+                                    onClick = { session.loadRemoteDisplays() },
+                                    modifier = Modifier.size(28.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Default.Refresh,
+                                        contentDescription = "Refresh displays",
+                                        tint = Color(0xFF9EB3C2),
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                            }
+                            if (remoteDisplays.isNotEmpty()) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .horizontalScroll(rememberScrollState()),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    remoteDisplays.forEach { disp ->
+                                        val tag = buildString {
+                                            append(disp.label)
+                                            if (disp.isPrimary) append(AppLocalization.t(" (主)", " (Main)", lang))
+                                            if (disp.resolution.isNotBlank()) append(" · ${disp.resolution}")
+                                        }
+                                        PillChoice(
+                                            label = tag,
+                                            selected = disp.isSelected,
+                                            onClick = {
+                                                if (!switchingDisplay && !disp.isSelected) {
+                                                    session.switchRemoteDisplay(disp)
+                                                }
+                                            }
+                                        )
+                                    }
+                                }
+                            } else {
+                                Text(
+                                    text = AppLocalization.t("点击右侧刷新检测远端显示器", "Tap refresh to detect host displays", lang),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFF6F8496)
+                                )
+                            }
+                            displayStatus?.let { msg ->
+                                Text(
+                                    text = msg,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = NodeDeckColors.AccentLight
+                                )
+                            }
+                            HorizontalDivider(color = Color(0xFF263340))
+                        }
+
+                        // Aspect Ratio & Zoom Controls
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    Icons.Default.AspectRatio,
+                                    contentDescription = null,
+                                    tint = NodeDeckColors.AccentLight,
+                                    modifier = Modifier.size(15.dp)
+                                )
+                                Text(
+                                    text = AppLocalization.t("画面比例与缩放", "Aspect & Zoom", lang),
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = Color(0xFF9EB3C2)
+                                )
+                            }
+                            Text(
+                                text = "${videoW}×${videoH}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFF8AA2B5)
+                            )
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            PillChoice(
+                                label = AppLocalization.t("原比例", "Original Fit", lang),
+                                selected = !fillCropMode,
+                                onClick = { fillCropMode = false }
+                            )
+                            PillChoice(
+                                label = AppLocalization.t("铺满裁剪", "Fill Crop", lang),
+                                selected = fillCropMode,
+                                onClick = { fillCropMode = true }
+                            )
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            listOf(1.0f to "1.0x", 1.25f to "1.25x", 1.5f to "1.5x", 2.0f to "2.0x").forEach { (scale, lbl) ->
+                                PillChoice(
+                                    label = lbl,
+                                    selected = abs(zoomScale - scale) < 0.05f,
+                                    onClick = { zoomScale = scale }
+                                )
+                            }
+                        }
+
+                        HorizontalDivider(color = Color(0xFF263340))
 
                         // Resolution Selector
                         Text(
@@ -758,9 +923,9 @@ private fun StreamScreen(
                             }
                         }
 
-                        HorizontalDivider(color = Color(0xFF283542))
+                        HorizontalDivider(color = Color(0xFF263340))
 
-                        // Input & HUD Controls
+                        // Input, Audio & HUD Controls
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -769,9 +934,9 @@ private fun StreamScreen(
                                 modifier = Modifier.weight(1f),
                                 icon = Icons.Default.TouchApp,
                                 label = if (touchpadMode) {
-                                    AppLocalization.t("触控板模式", "Touchpad", lang)
+                                    AppLocalization.t("触控板", "Touchpad", lang)
                                 } else {
-                                    AppLocalization.t("直接触控", "Direct Touch", lang)
+                                    AppLocalization.t("直接触控", "Direct", lang)
                                 },
                                 active = touchpadMode,
                                 onClick = { session.setTouchpadMode(!touchpadMode) }
@@ -779,7 +944,7 @@ private fun StreamScreen(
                             ControlTileButton(
                                 modifier = Modifier.weight(1f),
                                 icon = Icons.Default.Keyboard,
-                                label = AppLocalization.t("软键盘/功能键", "Keyboard", lang),
+                                label = AppLocalization.t("键盘", "Keyboard", lang),
                                 active = showKeyboardDock,
                                 onClick = {
                                     showKeyboardDock = !showKeyboardDock
@@ -788,11 +953,49 @@ private fun StreamScreen(
                             )
                             ControlTileButton(
                                 modifier = Modifier.weight(1f),
+                                icon = if (audioMuted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
+                                label = if (audioMuted) AppLocalization.t("已静音", "Muted", lang) else AppLocalization.t("声音", "Audio", lang),
+                                active = !audioMuted,
+                                onClick = { session.setAudioMuted(!audioMuted) }
+                            )
+                            ControlTileButton(
+                                modifier = Modifier.weight(1f),
                                 icon = Icons.Default.Speed,
-                                label = AppLocalization.t("性能浮窗", "Pin HUD", lang),
+                                label = AppLocalization.t("浮窗", "HUD", lang),
                                 active = showHud,
                                 onClick = { session.setShowHud(!showHud) }
                             )
+                        }
+
+                        // Quick Hotkeys Bar
+                        Text(
+                            text = AppLocalization.t("常用快捷键", "Quick Hotkeys", lang),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = Color(0xFF9EB3C2)
+                        )
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            fun tapCombo(modVk: Int, modFlag: Byte, keyVk: Int, extMod: Boolean = false) {
+                                MoonlightNative.sendVirtualKey(modVk, true, extended = extMod)
+                                MoonlightNative.sendVirtualKey(keyVk, true, modifiers = modFlag)
+                                MoonlightNative.sendVirtualKey(keyVk, false, modifiers = modFlag)
+                                MoonlightNative.sendVirtualKey(modVk, false, extended = extMod)
+                            }
+                            KeyChip("⌘/Win+Tab") { tapCombo(0x5B, MoonlightNative.MODIFIER_META, 0x09, extMod = true) }
+                            KeyChip("Alt+Tab") { tapCombo(0xA4, MoonlightNative.MODIFIER_ALT, 0x09) }
+                            KeyChip("⌘+Space") { tapCombo(0x5B, MoonlightNative.MODIFIER_META, 0x20, extMod = true) }
+                            KeyChip("Ctrl+C") { tapCombo(0xA2, MoonlightNative.MODIFIER_CTRL, 0x43) }
+                            KeyChip("Ctrl+V") { tapCombo(0xA2, MoonlightNative.MODIFIER_CTRL, 0x56) }
+                            KeyChip("⌘+C") { tapCombo(0x5B, MoonlightNative.MODIFIER_META, 0x43, extMod = true) }
+                            KeyChip("⌘+V") { tapCombo(0x5B, MoonlightNative.MODIFIER_META, 0x56, extMod = true) }
+                            KeyChip("Esc") {
+                                MoonlightNative.sendVirtualKey(0x1B, true)
+                                MoonlightNative.sendVirtualKey(0x1B, false)
+                            }
                         }
 
                         // SSH Clipboard & Privacy Screen
@@ -866,16 +1069,16 @@ private fun StreamScreen(
                                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF344352)),
                                 onClick = { onDisconnect(false) }
                             ) {
-                                Text(AppLocalization.t("断开连接", "Disconnect", lang))
+                                Text(AppLocalization.t("断开连接", "Disconnect", lang), fontSize = 12.sp)
                             }
                             Button(
                                 modifier = Modifier.weight(1f),
                                 colors = ButtonDefaults.buttonColors(containerColor = NodeDeckColors.Offline),
                                 onClick = { onDisconnect(true) }
                             ) {
-                                Icon(Icons.Default.PowerSettingsNew, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Icon(Icons.Default.PowerSettingsNew, contentDescription = null, modifier = Modifier.size(15.dp))
                                 Spacer(Modifier.width(4.dp))
-                                Text(AppLocalization.t("退出远端应用", "Quit App", lang))
+                                Text(AppLocalization.t("退出应用", "Quit App", lang), fontSize = 12.sp)
                             }
                         }
                     }
@@ -1053,7 +1256,7 @@ private fun KeyboardAccessoryDock(
                         sendTapVk(0x0D)
                     }
                 }) {
-                    Icon(Icons.Default.Send, contentDescription = "Send", tint = NodeDeckColors.AccentLight)
+                    Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send", tint = NodeDeckColors.AccentLight)
                 }
                 IconButton(onClick = onClose) {
                     Icon(Icons.Default.Close, contentDescription = "Close", tint = Color(0xFF9EB3C2))

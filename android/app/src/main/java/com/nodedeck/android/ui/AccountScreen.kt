@@ -43,6 +43,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
@@ -343,29 +344,64 @@ fun AccountScreen(
                                 Text(err, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                             }
 
+                            val store = remember(context) { com.nodedeck.android.NodeDeckApp.from(context).store }
+                            var alwaysOn by remember { mutableStateOf(store.isMeshAlwaysOn()) }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = AppLocalization.t("常驻自动组网", "Always-On Mesh", lang),
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                    Text(
+                                        text = AppLocalization.t("保持后台与开机自动连接加密私有网", "Keep private mesh connected automatically", lang),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                Switch(
+                                    checked = alwaysOn,
+                                    onCheckedChange = { checked ->
+                                        alwaysOn = checked
+                                        store.setMeshAlwaysOn(checked)
+                                        if (checked) {
+                                            startBuiltInMesh()
+                                        } else {
+                                            MeshRuntimeController.stop(context)
+                                        }
+                                    }
+                                )
+                            }
+
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                if (isRunning) {
-                                    Button(
-                                        modifier = Modifier.weight(1f),
-                                        colors = ButtonDefaults.buttonColors(containerColor = NodeDeckColors.Offline),
-                                        onClick = { MeshRuntimeController.stop(context) }
-                                    ) {
-                                        Icon(Icons.Default.Stop, contentDescription = null, modifier = Modifier.size(16.dp))
-                                        Spacer(Modifier.width(6.dp))
-                                        Text(AppLocalization.t("断开组网", "Pause Mesh", lang))
+                                Button(
+                                    modifier = Modifier.weight(1f),
+                                    onClick = {
+                                        alwaysOn = true
+                                        store.setMeshAlwaysOn(true)
+                                        startBuiltInMesh()
                                     }
-                                } else {
-                                    Button(
-                                        modifier = Modifier.weight(1f),
-                                        onClick = { startBuiltInMesh() }
-                                    ) {
-                                        Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
-                                        Spacer(Modifier.width(6.dp))
-                                        Text(AppLocalization.t("开启内置组网", "Connect Mesh", lang))
-                                    }
+                                ) {
+                                    Icon(
+                                        if (isRunning) Icons.Default.Refresh else Icons.Default.PlayArrow,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(
+                                        if (isRunning) {
+                                            AppLocalization.t("重连组网", "Reconnect Mesh", lang)
+                                        } else {
+                                            AppLocalization.t("立即开启组网", "Connect Mesh", lang)
+                                        }
+                                    )
                                 }
                                 OutlinedButton(onClick = { viewModel.syncAccountState() }) {
                                     Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
