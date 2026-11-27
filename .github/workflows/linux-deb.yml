@@ -1,0 +1,75 @@
+name: Linux Self-Contained DEB CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "linux/**"
+      - "Sources/CMoonlightCommon/**"
+      - ".github/workflows/linux-deb.yml"
+  pull_request:
+    paths:
+      - "linux/**"
+      - "Sources/CMoonlightCommon/**"
+  workflow_dispatch:
+
+jobs:
+  build-client-deb:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential pkg-config nasm patchelf curl xz-utils \
+            libsdl2-dev libopus-dev libssl-dev libva-dev libdrm-dev zlib1g-dev
+
+      - name: Build self-contained static-FFmpeg .deb (glibc 2.35 baseline)
+        run: |
+          BUNDLE_HOST=0 STATIC_FFMPEG=1 bash linux/build-deb.sh
+
+      - name: Upload built .deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nodedeck-linux-amd64-deb
+          path: artifacts/nodedeck_*_amd64.deb
+
+  verify-cross-distro-install:
+    needs: build-client-deb
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - ubuntu:22.04
+          - ubuntu:24.04
+          - ubuntu:25.04
+          - debian:trixie
+    steps:
+      - name: Download built .deb
+        uses: actions/download-artifact@v4
+        with:
+          name: nodedeck-linux-amd64-deb
+          path: dist
+
+      - name: Verify clean apt install & zero missing shared libraries in ${{ matrix.image }}
+        run: |
+          docker run --rm -v "$PWD/dist:/dist:ro" "${{ matrix.image }}" bash -euo pipefail -c '
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+            apt-get install -y /dist/nodedeck_*_amd64.deb
+            echo "=== ldd /opt/nodedeck/nodedeck-stream ==="
+            ldd /opt/nodedeck/nodedeck-stream
+            if ldd /opt/nodedeck/nodedeck-stream | grep -q "not found"; then
+              echo "ERROR: missing shared library!" >&2
+              exit 1
+            fi
+            if readelf -d /opt/nodedeck/nodedeck-stream | grep -qE "libavcodec|libavutil|libswscale"; then
+              echo "ERROR: unexpected dynamic FFmpeg dependency!" >&2
+              exit 1
+            fi
+            python3 -m py_compile /opt/nodedeck/nodedeck_linux.py /opt/nodedeck/nodedeck_mesh_agent.py
+            echo "OK: clean install & runtime audit passed on ${{ matrix.image }}"
+          '

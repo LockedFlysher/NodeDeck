@@ -1,10 +1,20 @@
 #!/usr/bin/env bash
-# Build an All-in-One Debian/Ubuntu .deb package for NodeDeck Linux (Client + Built-in nodedeck-host).
+# Build an All-in-One self-contained Debian/Ubuntu .deb package for NodeDeck Linux
+# (Client + Built-in nodedeck-host + Built-in EasyTier Mesh).
+#
+# Cross-distro portability design:
+# - Statically links a minimal FFmpeg (H.264/HEVC/AV1 + VAAPI + CUDA/NVDEC via dlopen)
+#   into nodedeck-stream -> ZERO libavcodecXX / libavutilXX / libswscaleXX SONAME lock-in.
+# - Bundles libminiupnpc.so.* into /opt/nodedeck/host/lib and stamps an absolute+relative
+#   RPATH (/opt/nodedeck/host/lib:$ORIGIN/../lib) on nodedeck-host so it resolves even
+#   under AT_SECURE=1 (cap_sys_admin+p) -> ZERO libminiupnpcXX SONAME lock-in.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VERSION="${VERSION:-2.1.0}"
 BUNDLE_HOST="${BUNDLE_HOST:-1}"
+STATIC_FFMPEG="${STATIC_FFMPEG:-1}"
+FFMPEG_PREFIX="${FFMPEG_PREFIX:-$ROOT/.build/ffmpeg-static}"
 if [[ -z "${HOST_SRC_DIR:-}" ]]; then
   if [[ -x "$ROOT/.build/host-linux/bin/nodedeck-host" ]]; then
     HOST_SRC_DIR="$ROOT/.build/host-linux"
@@ -37,6 +47,22 @@ for f in "$ROOT"/Sources/CMoonlightCommon/src/*.c; do
   COMMON_SRCS+=("$f")
 done
 
+if [[ "$STATIC_FFMPEG" == "1" ]]; then
+  PREFIX="$FFMPEG_PREFIX" bash "$ROOT/linux/build-ffmpeg-static.sh"
+  FFMPEG_CFLAGS="-I${FFMPEG_PREFIX}/include"
+  FFMPEG_LIBS=(
+    -Wl,--start-group
+    "${FFMPEG_PREFIX}/lib/libavcodec.a"
+    "${FFMPEG_PREFIX}/lib/libswscale.a"
+    "${FFMPEG_PREFIX}/lib/libavutil.a"
+    -Wl,--end-group
+    -lva -lva-drm -ldrm -lz -ldl
+  )
+else
+  FFMPEG_CFLAGS="$(pkg-config --cflags libavcodec libavutil libswscale)"
+  read -r -a FFMPEG_LIBS <<< "$(pkg-config --libs libavcodec libavutil libswscale)"
+fi
+
 "${CC:-gcc}" -O2 -std=gnu11 \
   -DHAS_FCNTL=1 -DHAS_IOCTL=1 -DHAS_POLL=1 \
   -DHAS_GETNAMEINFO=1 -DHAS_GETADDRINFO=1 -DHAS_GETHOSTBYNAME_R=1 -DHAS_GETHOSTBYADDR_R=1 \
@@ -47,14 +73,17 @@ done
   -I"$ROOT/Sources/CMoonlightCommon/nanors" \
   -I"$ROOT/Sources/CMoonlightCommon/nanors/deps" \
   -I"$ROOT/Sources/CMoonlightCommon/nanors/deps/obl" \
+  $FFMPEG_CFLAGS \
   "$ROOT/linux/nodedeck_stream.c" \
   "${COMMON_SRCS[@]}" \
   "$ROOT"/Sources/CMoonlightCommon/enet/{callbacks,compress,host,list,packet,peer,protocol,unix}.c \
-  "$ROOT/Sources/CMoonlightCommon/nanors/rs.c" \
+  "$ROOT"/Sources/CMoonlightCommon/nanors/rs.c \
   "$ROOT"/Sources/CMoonlightCommon/nanors/deps/obl/{oblas_common,oblas_lite}.c \
-  $(pkg-config --cflags --libs sdl2 libavcodec libavutil libswscale opus libcrypto) \
+  $(pkg-config --cflags --libs sdl2 opus libcrypto) \
+  "${FFMPEG_LIBS[@]}" \
   -lpthread -lm \
   -o "$STAGE/opt/nodedeck/nodedeck-stream"
+strip --strip-unneeded "$STAGE/opt/nodedeck/nodedeck-stream" 2>/dev/null || true
 
 install -m 0755 "$ROOT/linux/nodedeck_linux.py" "$STAGE/opt/nodedeck/nodedeck_linux.py"
 install -m 0755 "$ROOT/linux/nodedeck_mesh_agent.py" "$STAGE/opt/nodedeck/nodedeck_mesh_agent.py"
@@ -73,14 +102,60 @@ if [[ -f "$ROOT/linux/nodedeck.png" ]]; then
   install -m 0644 "$ROOT/linux/nodedeck.png" "$STAGE/usr/share/pixmaps/nodedeck.png"
 fi
 
+ensure_patchelf() {
+  if command -v patchelf >/dev/null 2>&1; then
+    command -v patchelf
+    return 0
+  fi
+  local tools_dir="$ROOT/.build/host-tools"
+  mkdir -p "$tools_dir"
+  if [[ -x "$tools_dir/root/usr/bin/patchelf" ]]; then
+    echo "$tools_dir/root/usr/bin/patchelf"
+    return 0
+  fi
+  if command -v apt-get >/dev/null 2>&1 && command -v dpkg-deb >/dev/null 2>&1; then
+    (cd "$tools_dir" && apt-get download patchelf >/dev/null 2>&1 && dpkg-deb -x patchelf_*.deb "$tools_dir/root") || true
+    if [[ -x "$tools_dir/root/usr/bin/patchelf" ]]; then
+      echo "$tools_dir/root/usr/bin/patchelf"
+      return 0
+    fi
+  fi
+  return 1
+}
+
 HOST_DEPENDS=""
 if [[ "$BUNDLE_HOST" == "1" ]]; then
   if [[ -x "$HOST_SRC_DIR/bin/nodedeck-host" ]]; then
     echo "=== Bundling built-in nodedeck-host from $HOST_SRC_DIR ==="
-    mkdir -p "$STAGE/opt/nodedeck/host"
+    mkdir -p "$STAGE/opt/nodedeck/host/lib"
     cp -a "$HOST_SRC_DIR/." "$STAGE/opt/nodedeck/host/"
     chmod 0755 "$STAGE/opt/nodedeck/host/bin/nodedeck-host"
-    HOST_DEPENDS=", libminiupnpc17 | libminiupnpc18, libnuma1, libva2, libva-drm2, libdrm2, libevdev2, libpulse0, libcurl4t64 | libcurl4, libcap2, libwayland-client0"
+
+    # Bundle distro-volatile libminiupnpc.so.* alongside nodedeck-host
+    MINI_SONAME="$(readelf -d "$STAGE/opt/nodedeck/host/bin/nodedeck-host" 2>/dev/null \
+      | sed -n 's/.*Shared library: \[\(libminiupnpc\.so\.[0-9.]*\)\].*/\1/p' | head -n 1 || true)"
+    if [[ -z "$MINI_SONAME" ]]; then
+      MINI_SONAME="$(readelf -d "$STAGE/opt/nodedeck/host/bin/nodedeck-host" 2>/dev/null \
+        | grep -oE 'libminiupnpc\.so\.[0-9.]+' | head -n 1 || true)"
+    fi
+    if [[ -n "$MINI_SONAME" && ! -f "$STAGE/opt/nodedeck/host/lib/$MINI_SONAME" ]]; then
+      MINI_PATH="$(ldconfig -p 2>/dev/null | awk -v lib="$MINI_SONAME" '$1 == lib {print $NF; exit}' || true)"
+      if [[ -n "$MINI_PATH" && -f "$MINI_PATH" ]]; then
+        cp -L "$MINI_PATH" "$STAGE/opt/nodedeck/host/lib/$MINI_SONAME"
+      fi
+    fi
+
+    # Stamp absolute + relative RUNPATH so /opt/nodedeck/host/lib resolves even with cap_sys_admin+p (AT_SECURE=1)
+    PATCHELF_BIN="$(ensure_patchelf || true)"
+    if [[ -n "$PATCHELF_BIN" ]]; then
+      "$PATCHELF_BIN" --set-rpath '/opt/nodedeck/host/lib:$ORIGIN/../lib' "$STAGE/opt/nodedeck/host/bin/nodedeck-host"
+    else
+      echo "ERROR: patchelf not found; cannot stamp RPATH on nodedeck-host" >&2
+      exit 1
+    fi
+
+    # Only decade-stable system libraries (ZERO libminiupnpcXX SONAME lock-in!)
+    HOST_DEPENDS=", libnuma1, libevdev2, libpulse0, libcurl4t64 | libcurl4, libcap2, libwayland-client0"
 
     cat > "$STAGE/usr/lib/systemd/user/nodedeck-host.service" <<'EOF'
 [Unit]
@@ -102,6 +177,26 @@ EOF
   fi
 fi
 
+# Self-containment audit: verify zero volatile FFmpeg/miniupnpc external lock-in
+echo "=== Auditing dynamic library dependencies ==="
+if [[ "$STATIC_FFMPEG" == "1" ]]; then
+  if readelf -d "$STAGE/opt/nodedeck/nodedeck-stream" | grep -qE 'libavcodec\.so|libavutil\.so|libswscale\.so'; then
+    echo "ERROR: nodedeck-stream still dynamically links system FFmpeg!" >&2
+    readelf -d "$STAGE/opt/nodedeck/nodedeck-stream" | grep NEEDED >&2
+    exit 1
+  fi
+fi
+if [[ -x "$STAGE/opt/nodedeck/host/bin/nodedeck-host" ]]; then
+  if ! readelf -d "$STAGE/opt/nodedeck/host/bin/nodedeck-host" | grep -q '/opt/nodedeck/host/lib'; then
+    echo "ERROR: nodedeck-host is missing /opt/nodedeck/host/lib RPATH/RUNPATH!" >&2
+    exit 1
+  fi
+  if ! ls "$STAGE/opt/nodedeck/host/lib/"libminiupnpc.so.* >/dev/null 2>&1; then
+    echo "ERROR: bundled libminiupnpc.so.* missing from /opt/nodedeck/host/lib!" >&2
+    exit 1
+  fi
+fi
+
 cat > "$STAGE/usr/local/bin/nodedeck" <<'EOF'
 #!/usr/bin/env bash
 exec python3 /opt/nodedeck/nodedeck_linux.py "$@"
@@ -120,6 +215,11 @@ Categories=Network;System;Utility;
 StartupWMClass=nodedeck_linux.py
 EOF
 
+FFMPEG_DEPENDS=""
+if [[ "$STATIC_FFMPEG" != "1" ]]; then
+  FFMPEG_DEPENDS=", libavcodec61 | libavcodec60 | libavcodec-extra60 | libavcodec59, libavutil59 | libavutil58 | libavutil57, libswscale8 | libswscale7 | libswscale6"
+fi
+
 cat > "$STAGE/DEBIAN/control" <<EOF
 Package: nodedeck
 Version: ${VERSION}
@@ -127,10 +227,11 @@ Section: net
 Priority: optional
 Architecture: ${ARCH}
 Maintainer: NodeDeck Contributors
-Depends: python3, python3-gi, gir1.2-gtk-3.0, libsdl2-2.0-0, libopus0, libssl3t64 | libssl3, libavcodec60 | libavcodec-extra60 | libavcodec59, libavutil58 | libavutil57, libswscale7 | libswscale6, openssh-client, openssl${HOST_DEPENDS}
+Depends: python3, python3-gi, gir1.2-gtk-3.0, libsdl2-2.0-0, libopus0, libssl3t64 | libssl3, libva2, libva-drm2, libdrm2, openssh-client, openssl${FFMPEG_DEPENDS}${HOST_DEPENDS}
 Description: NodeDeck All-in-One SSH Manager, Remote Desktop Client & Built-in Host
  Zero-cloud SSH workstation manager with live CPU/GPU telemetry, port forwarding,
- hardware-accelerated Moonlight streaming client, and built-in Sunshine host (nodedeck-host).
+ self-contained hardware-accelerated Moonlight streaming client (static FFmpeg),
+ and built-in Sunshine host (nodedeck-host) with bundled runtime dependencies.
 EOF
 
 cat > "$STAGE/DEBIAN/postinst" <<'EOF'
@@ -145,5 +246,6 @@ EOF
 chmod 0755 "$STAGE/DEBIAN/postinst"
 
 dpkg-deb -Zxz --build "$STAGE" "$DEB_PATH"
-echo "Built All-in-One package: $DEB_PATH"
+echo "Built self-contained All-in-One package: $DEB_PATH"
 ls -lh "$DEB_PATH"
+dpkg-deb -I "$DEB_PATH" | grep -E 'Package:|Version:|Architecture:|Depends:'
