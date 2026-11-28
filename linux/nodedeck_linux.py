@@ -314,6 +314,135 @@ def is_local_ssh_running() -> bool:
         return False
 
 
+def local_host_conf_path() -> Path:
+    for cand in (CONF_DIR / "host.conf", CONF_DIR / "host" / "host.conf"):
+        if cand.exists():
+            return cand
+    return CONF_DIR / "host.conf"
+
+
+def read_local_host_conf() -> dict[str, str]:
+    p = local_host_conf_path()
+    out: dict[str, str] = {}
+    if not p.exists():
+        return out
+    for raw in p.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        out[k.strip()] = v.strip()
+    return out
+
+
+def write_local_host_conf(updates: dict[str, str | None]) -> Path:
+    CONF_DIR.mkdir(parents=True, exist_ok=True)
+    apps_path = CONF_DIR / "apps.json"
+    if not apps_path.exists():
+        apps_path.write_text('{\n  "env": {},\n  "apps": [{ "name": "Desktop", "image-path": "desktop.png" }]\n}\n', encoding="utf-8")
+    p = local_host_conf_path()
+    cfg = read_local_host_conf()
+    # Auto-repair any legacy /bin/bash paths
+    for k in ("file_apps", "file_state", "credentials_file", "pkey", "cert"):
+        if k not in cfg or re.match(r"^/bin/(ba|z|da)?sh/", cfg.get(k, "")):
+            defaults = {
+                "file_apps": str(CONF_DIR / "apps.json"),
+                "file_state": str(CONF_DIR / "host_state.json"),
+                "credentials_file": str(CONF_DIR / "credentials.json"),
+                "pkey": str(CONF_DIR / "host.key"),
+                "cert": str(CONF_DIR / "host.cert"),
+            }
+            cfg[k] = defaults[k]
+    cfg.setdefault("port", "47989")
+    for k, v in updates.items():
+        if v is None or v == "" or v == "auto":
+            cfg.pop(k, None)
+        else:
+            cfg[k] = str(v)
+    p.write_text("\n".join(f"{k} = {v}" for k, v in cfg.items()) + "\n", encoding="utf-8")
+    return p
+
+
+def detect_local_host_encoder_status() -> tuple[str, str]:
+    """Return (status_kind, summary) from current nodedeck-host invocation journal: ok / warn / unknown."""
+    lines: list[str] = []
+    try:
+        inv = subprocess.run(
+            ["systemctl", "--user", "show", "-p", "InvocationID", "--value", "nodedeck-host.service"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        ).stdout.strip()
+        if inv:
+            r = subprocess.run(
+                ["journalctl", "--user", f"_SYSTEMD_INVOCATION_ID={inv}", "--no-pager"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            lines = r.stdout.splitlines()
+        if not lines:
+            r = subprocess.run(
+                ["journalctl", "--user", "-u", "nodedeck-host.service", "-n", "500", "--no-pager"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            lines = r.stdout.splitlines()
+    except Exception:
+        lines = []
+    active_enc = ""
+    failed_msg = ""
+    for ln in reversed(lines):
+        if not active_enc and "Found H.264 encoder:" in ln:
+            active_enc = ln.split("Found H.264 encoder:", 1)[1].strip()
+        elif not active_enc and "Found HEVC encoder:" in ln:
+            active_enc = ln.split("Found HEVC encoder:", 1)[1].strip()
+        elif not failed_msg and ("Unable to find display or encoder" in ln or "Unable to initialize capture method" in ln):
+            failed_msg = "encoder_or_capture_failed"
+        if "Starting nodedeck-host.service" in ln:
+            break
+    if active_enc:
+        return "ok", active_enc
+    if failed_msg:
+        return "warn", failed_msg
+    return "unknown", ""
+
+
+def detect_local_gpu_summary() -> tuple[list[str], list[str], str]:
+    gpus: list[str] = []
+    if shutil.which("nvidia-smi"):
+        try:
+            r = subprocess.run(
+                ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            for ln in r.stdout.splitlines():
+                if ln.strip():
+                    gpus.append(ln.strip())
+        except Exception:
+            pass
+    if shutil.which("lspci"):
+        try:
+            r = subprocess.run(["lspci"], capture_output=True, text=True, timeout=2)
+            for ln in r.stdout.splitlines():
+                if any(tok in ln for tok in ("VGA compatible controller", "3D controller", "Display controller")):
+                    desc = ln.split(":", 2)[-1].strip()
+                    norm_desc = desc.lower()
+                    if desc and not any(
+                        (g.lower() in norm_desc or g.lower().removeprefix("nvidia ") in norm_desc)
+                        for g in gpus
+                    ):
+                        gpus.append(desc)
+        except Exception:
+            pass
+    render_nodes = sorted(str(p) for p in Path("/dev/dri").glob("renderD*")) if Path("/dev/dri").exists() else []
+    sess = os.environ.get("XDG_SESSION_TYPE") or ("wayland" if os.environ.get("WAYLAND_DISPLAY") else "x11")
+    return gpus, render_nodes, sess
+
+
 def is_local_host_running() -> bool:
     try:
         r = subprocess.run(
@@ -1403,6 +1532,12 @@ class NodeDeckWindow(Gtk.Window):
         self.sw_local_host.set_valign(Gtk.Align.CENTER)
         self.sw_local_host.connect("state-set", self.on_local_host_switch)
         host_bar.pack_end(self.sw_local_host, False, False, 0)
+
+        self.btn_host_settings = Gtk.Button(label="⚙")
+        self.btn_host_settings.set_valign(Gtk.Align.CENTER)
+        self.btn_host_settings.get_style_context().add_class("nd-icon-btn")
+        self.btn_host_settings.connect("clicked", self.on_configure_local_host)
+        host_bar.pack_end(self.btn_host_settings, False, False, 0)
         sidebar.pack_start(host_bar, False, False, 0)
 
         # 5b. Pinned Local SSH Activation Bar (explicit sudo activation for metrics/terminal/SFTP)
@@ -1511,12 +1646,26 @@ class NodeDeckWindow(Gtk.Window):
         finally:
             self._updating_host_switch = False
 
+        self.btn_host_settings.set_tooltip_text(self.t("本机被控设置（视频编码器 / 采集方式 / 端口）", "Local Host Settings (Encoder / Capture / Port)"))
+        self.btn_host_settings.set_sensitive(bool(host_bin))
+
         if not host_bin:
             self.lbl_host_title.set_markup(f'<span foreground="#8b9bb0">○</span> <b>{GLib.markup_escape_text(self.t("本机被控端", "Local Host"))}</b>')
             self.lbl_host_sub.set_text(self.t("未安装 nodedeck-host", "nodedeck-host not bundled"))
         elif running:
-            self.lbl_host_title.set_markup(f'<span foreground="#46d687">●</span> <b>{GLib.markup_escape_text(self.t("本机被控端", "Local Host"))}</b>')
-            self.lbl_host_sub.set_text(self.t("运行中 · 端口 47989", "Running · Port 47989"))
+            cfg_now = read_local_host_conf()
+            cur_port = cfg_now.get("port", "47989")
+            enc_kind, enc_info = detect_local_host_encoder_status()
+            if enc_kind == "warn":
+                self.lbl_host_title.set_markup(f'<span foreground="#f0a742">⚠</span> <b>{GLib.markup_escape_text(self.t("本机被控异常", "Host Warning"))}</b>')
+                self.lbl_host_sub.set_text(self.t("编码器/采集未就绪 · 点 ⚙ 切换", "Encoder/capture issue · click ⚙"))
+            elif enc_kind == "ok":
+                short_enc = enc_info.split(" ", 1)[0]
+                self.lbl_host_title.set_markup(f'<span foreground="#46d687">●</span> <b>{GLib.markup_escape_text(self.t("本机被控端", "Local Host"))}</b>')
+                self.lbl_host_sub.set_text(self.t(f"运行中 · :{cur_port} · {short_enc}", f"Running · :{cur_port} · {short_enc}"))
+            else:
+                self.lbl_host_title.set_markup(f'<span foreground="#46d687">●</span> <b>{GLib.markup_escape_text(self.t("本机被控端", "Local Host"))}</b>')
+                self.lbl_host_sub.set_text(self.t(f"运行中 · 端口 {cur_port}", f"Running · Port {cur_port}"))
         else:
             self.lbl_host_title.set_markup(f'<span foreground="#8b9bb0">○</span> <b>{GLib.markup_escape_text(self.t("本机被控端", "Local Host"))}</b>')
             self.lbl_host_sub.set_text(self.t("已关闭 · 点击右侧开启", "Stopped · Toggle to enable"))
@@ -1558,6 +1707,153 @@ class NodeDeckWindow(Gtk.Window):
             return False
         self.on_toggle_local_host(None, desired_state=bool(state))
         return False
+
+    def on_configure_local_host(self, _btn=None):
+        cfg = read_local_host_conf()
+        gpus, render_nodes, sess_type = detect_local_gpu_summary()
+        enc_kind, enc_info = detect_local_host_encoder_status()
+
+        dlg = Gtk.Dialog(
+            title=self.t("本机被控端设置（编码器与画面采集）", "Local Host Settings (Encoder & Capture)"),
+            transient_for=self,
+            flags=0,
+        )
+        dlg.set_default_size(500, 340)
+        box = dlg.get_content_area()
+        box.set_spacing(10)
+        box.set_margin_top(14)
+        box.set_margin_bottom(14)
+        box.set_margin_start(16)
+        box.set_margin_end(16)
+
+        gpu_line = " / ".join(gpus[:2]) if gpus else self.t("未检测到独立 GPU", "No discrete GPU detected")
+        if enc_kind == "ok":
+            status_line = self.t(f"当前生效编码器：{enc_info}", f"Active encoder: {enc_info}")
+        elif enc_kind == "warn":
+            status_line = self.t(
+                "⚠ 上次启动未能初始化编码器/采集（常见于双显卡本切换或屏幕休眠），建议下方显式选择编码器并保存重启。",
+                "⚠ Last startup failed to initialize capture/encoder. Pick an encoder below and apply.",
+            )
+        else:
+            status_line = self.t("当前被控端尚未完成编码器探测。", "Encoder not probed yet.")
+
+        info_lbl = Gtk.Label(
+            label=self.t(
+                f"本机环境：{sess_type.upper()} · GPU：{gpu_line}\n{status_line}",
+                f"Environment: {sess_type.upper()} · GPU: {gpu_line}\n{status_line}",
+            )
+        )
+        info_lbl.set_xalign(0)
+        info_lbl.set_line_wrap(True)
+        box.pack_start(info_lbl, False, False, 0)
+
+        cmb_enc = Gtk.ComboBoxText()
+        enc_options = [
+            ("auto", self.t("自动选择 (auto · 优先硬编，失败自动回退软编)", "Auto (prefer HW, fallback to software)")),
+            ("nvenc", self.t("NVIDIA NVENC (nvenc · 独显直连显示器推荐)", "NVIDIA NVENC (dedicated NVIDIA display)")),
+            ("vaapi", self.t("VA-API (vaapi · Intel/AMD 核显硬编，需 VA 驱动)", "VA-API (Intel/AMD iGPU hardware encode)")),
+            ("vulkan", self.t("Vulkan Video (vulkan · 通用硬件编码)", "Vulkan Video (hardware encode)")),
+            ("software", self.t("CPU 软编 libx264 (software · 双显卡本/Wayland 最稳)", "Software libx264 (highest compatibility)")),
+        ]
+        cur_enc = cfg.get("encoder", "auto") or "auto"
+        for opt_id, opt_lbl in enc_options:
+            cmb_enc.append(opt_id, opt_lbl)
+        cmb_enc.set_active_id(cur_enc if any(k == cur_enc for k, _ in enc_options) else "auto")
+
+        cmb_cap = Gtk.ComboBoxText()
+        cap_options = [
+            ("auto", self.t("自动选择 (auto · Wayland 自动走 KMS)", "Auto (KMS on Wayland / X11 on Xorg)")),
+            ("kms", self.t("KMS 底层直采 (kms · GNOME Wayland 推荐)", "KMS Direct Capture (GNOME Wayland)")),
+            ("x11", self.t("X11 桌面采集 (x11 · 传统 Xorg 桌面)", "X11 Capture (Xorg desktop)")),
+        ]
+        cur_cap = cfg.get("capture", "auto") or "auto"
+        for opt_id, opt_lbl in cap_options:
+            cmb_cap.append(opt_id, opt_lbl)
+        cmb_cap.set_active_id(cur_cap if any(k == cur_cap for k, _ in cap_options) else "auto")
+
+        ent_port = Gtk.Entry(text=cfg.get("port", "47989"))
+
+        cmb_drm = Gtk.ComboBoxText()
+        cmb_drm.append("auto", self.t("自动 (auto)", "Auto"))
+        for rn in render_nodes:
+            cmb_drm.append(rn, rn)
+        cur_drm = cfg.get("adapter_name", "auto") or "auto"
+        cmb_drm.set_active_id(cur_drm if cur_drm in render_nodes else "auto")
+
+        for lbl_txt, widget in [
+            (self.t("视频编码器:", "Video Encoder:"), cmb_enc),
+            (self.t("画面采集方式:", "Capture Method:"), cmb_cap),
+            (self.t("渲染设备节点:", "DRM Render Node:"), cmb_drm),
+            (self.t("监听端口:", "HTTP Port:"), ent_port),
+        ]:
+            row = Gtk.Box(spacing=8)
+            lbl = Gtk.Label(label=lbl_txt)
+            lbl.set_width_chars(14)
+            lbl.set_xalign(0)
+            row.pack_start(lbl, False, False, 0)
+            row.pack_start(widget, True, True, 0)
+            box.pack_start(row, False, False, 2)
+
+        hint_lbl = Gtk.Label(
+            label=self.t(
+                "提示：Intel+NVIDIA 双显卡笔记本（如机械革命）在 Wayland 下若屏幕接在核显，推荐先选「CPU 软编 libx264」或安装 intel-media-va-driver 后选「VA-API」。",
+                "Tip: On hybrid Intel+NVIDIA Wayland laptops where the built-in panel is wired to Intel iGPU, pick 'Software libx264' or 'VA-API' (with intel-media-va-driver).",
+            )
+        )
+        hint_lbl.set_xalign(0)
+        hint_lbl.set_line_wrap(True)
+        hint_lbl.get_style_context().add_class("nd-brand-sub")
+        box.pack_start(hint_lbl, False, False, 2)
+
+        dlg.add_buttons(
+            self.t("取消", "Cancel"),
+            Gtk.ResponseType.CANCEL,
+            self.t("保存并重启被控端", "Save & Restart Host"),
+            Gtk.ResponseType.OK,
+        )
+        dlg.set_default_response(Gtk.ResponseType.OK)
+        dlg.show_all()
+        resp = dlg.run()
+        sel_enc = cmb_enc.get_active_id() or "auto"
+        sel_cap = cmb_cap.get_active_id() or "auto"
+        sel_drm = cmb_drm.get_active_id() or "auto"
+        sel_port = ent_port.get_text().strip() or "47989"
+        dlg.destroy()
+
+        if resp != Gtk.ResponseType.OK:
+            return
+
+        write_local_host_conf({
+            "encoder": sel_enc,
+            "capture": sel_cap,
+            "adapter_name": sel_drm,
+            "port": sel_port if sel_port.isdigit() else "47989",
+        })
+        self.status_label.set_text(self.t(f"已保存编码器 ({sel_enc})，正在重启本机被控端并探测…", f"Saved encoder ({sel_enc}), restarting local host…"))
+
+        def worker():
+            subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+            subprocess.run(["systemctl", "--user", "enable", "--now", "nodedeck-host.service"], capture_output=True)
+            subprocess.run(["systemctl", "--user", "restart", "nodedeck-host.service"], capture_output=True)
+            time.sleep(3.0)
+            kind, info = detect_local_host_encoder_status()
+            GLib.idle_add(self._on_local_host_configured, sel_enc, kind, info)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_local_host_configured(self, chosen_enc: str, kind: str, info: str):
+        self._update_chrome_labels()
+        if kind == "ok":
+            self.status_label.set_text(self.t(f"本机被控端已就绪 · 当前编码器：{info}", f"Local host ready · Active encoder: {info}"))
+        elif kind == "warn":
+            self.status_label.set_text(
+                self.t(
+                    f"编码器 ({chosen_enc}) 未能启动，建议点 ⚙ 切换为 software (libx264) 并确认显示器未休眠",
+                    f"Encoder ({chosen_enc}) failed; switch to software (libx264) in ⚙",
+                )
+            )
+        else:
+            self.status_label.set_text(self.t(f"已应用配置 ({chosen_enc}) 并重启本机被控端", f"Applied ({chosen_enc}) and restarted local host"))
 
     def on_activate_local_ssh(self, _btn):
         ssh_ok = is_local_ssh_running()

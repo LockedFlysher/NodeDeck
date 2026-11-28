@@ -60,8 +60,8 @@ struct ArchitectureGuideSheet: View {
                 Text(l10n.t("技术原理与安全透明", "How NodeDeck Works & Security Model"))
                     .font(.headline)
                 Text(l10n.t(
-                    "无云端服务器 · 全开源协议 · 所有密钥与数据均由你本地掌控",
-                    "Zero Cloud Servers · Open-Source Protocols · Local-First Ownership"
+                    "可自建控制面 · P2P 优先直连 · 所有私钥与数据均由你本地掌控",
+                    "Self-Hostable Control Plane · P2P-First Mesh · Local-First Private Keys"
                 ))
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -86,8 +86,8 @@ struct ArchitectureGuideSheet: View {
 
     private var trustPledgeBanner: some View {
         HStack(spacing: 10) {
-            trustPill(icon: "icloud.slash", title: l10n.t("零云端中转", "Zero Cloud"))
-            trustPill(icon: "person.crop.circle.badge.xmark", title: l10n.t("免注册账号", "No Account"))
+            trustPill(icon: "network", title: l10n.t("P2P 优先直连", "P2P-First"))
+            trustPill(icon: "key.fill", title: l10n.t("私钥不出本机", "Local Private Keys"))
             trustPill(icon: "lock.shield", title: l10n.t("端到端加密", "End-to-End Encrypted"))
             trustPill(icon: "eye.slash", title: l10n.t("零遥测上报", "Zero Telemetry"))
         }

@@ -23,33 +23,33 @@ fun ArchitectureGuideDialog(onDismiss: () -> Unit) {
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(AppLocalization.t("零云端架构与安全透明说明", "Zero-Cloud Architecture & Security", lang)) },
+        title = { Text(AppLocalization.t("技术架构与安全透明说明", "Architecture & Security Model", lang)) },
         text = {
             Column(
                 modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 GuideBlock(
-                    title = AppLocalization.t("1. 100% 本地直连，无中继无遥测", "1. 100% Local Direct, Zero Relay", lang),
+                    title = AppLocalization.t("1. 端到端加密与 P2P 优先直连", "1. End-to-End Encrypted, P2P-First Mesh", lang),
                     body = AppLocalization.t(
-                        "所有 SSH 会话、SFTP 文件传输、端口转发和远程桌面串流均直接在本机与您的计算节点之间建立点对点连接，不经过任何云端服务器，不收集任何遥测数据。",
-                        "All SSH sessions, SFTP transfers, port forwards, and remote desktop streams connect directly between your phone and your compute nodes with zero cloud relay or telemetry.",
+                        "登录自建控制面账号后自动加入个人加密 EasyTier 私有组网（优先点对点 P2P 直连，仅在严格 NAT 下走自有种子节点中继）。SSH、SFTP 与 Moonlight 串流全程端到端加密，无任何第三方遥测。",
+                        "Sign in to your self-hosted control plane to auto-join a private encrypted EasyTier mesh (P2P-first, falling back to your own seed relay only behind strict NAT). Zero third-party telemetry.",
                         lang
                     )
                 )
                 GuideBlock(
                     title = AppLocalization.t("2. Android 端纯主控定位", "2. Pure Controller Role on Android", lang),
                     body = AppLocalization.t(
-                        "Android 版不包含 Sunshine 被控端服务，专注于主控运维：SSH 节点监控、交互式终端、后台端口转发、SFTP 文件管理以及基于硬件 MediaCodec 解码的低延迟 Moonlight 远程桌面（支持 1080p/1440p/4K 与 60/120/144/165Hz）。",
-                        "NodeDeck Android excludes the Sunshine host server and focuses on control: SSH monitoring, interactive PTY terminal, foreground port forwarding, SFTP, and MediaCodec hardware-decoded Moonlight streaming up to 4K 165Hz.",
+                        "Android 版不包含被控端服务，专注于主控运维：SSH 节点监控、交互式终端、后台端口转发、SFTP 文件管理以及基于硬件 MediaCodec 解码的低延迟 Moonlight 远程桌面（支持 1080p/1440p/4K 与 60/120/144/165Hz）。",
+                        "NodeDeck Android excludes the host server and focuses on control: SSH monitoring, interactive PTY terminal, foreground port forwarding, SFTP, and MediaCodec hardware-decoded Moonlight streaming up to 4K 165Hz.",
                         lang
                     )
                 )
                 GuideBlock(
-                    title = AppLocalization.t("3. 凭据与证书仅存本地沙箱", "3. Local Sandbox Credential Storage", lang),
+                    title = AppLocalization.t("3. 私钥不出本地，账号仅同步公钥", "3. Private Keys Stay Local", lang),
                     body = AppLocalization.t(
-                        "SSH 节点列表、私钥以及 Moonlight 本地自签 RSA-2048 客户端证书仅保存在应用私有目录内；Zero-PIN 配对仅复用您已授权的 SSH 连接写入远端 sunshine_state.json。",
-                        "SSH hosts, private keys, and your locally generated RSA-2048 Moonlight client certificate stay strictly inside app-private storage.",
+                        "SSH 私钥与 Moonlight RSA-2048 客户端私钥始终留在手机应用私有沙箱内绝不上传；控制面仅同步公开证书/SSH 公钥用于同账号设备免 PIN 一键配对。",
+                        "SSH private keys and your Moonlight RSA-2048 private key never leave app-private storage; the control plane only exchanges public certificates/keys for zero-PIN same-account pairing.",
                         lang
                     )
                 )

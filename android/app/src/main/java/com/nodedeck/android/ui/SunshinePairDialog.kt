@@ -68,17 +68,17 @@ fun SunshinePairDialog(
                     FilterChip(
                         selected = mode == 0,
                         onClick = { if (!busy) { mode = 0; errorMsg = null } },
-                        label = { Text(AppLocalization.t("账号激活", "Account", lang)) }
+                        label = { Text(AppLocalization.t("账号激活", "Account", lang), maxLines = 1, softWrap = false) }
                     )
                     FilterChip(
                         selected = mode == 1,
                         onClick = { if (!busy) { mode = 1; errorMsg = null } },
-                        label = { Text(AppLocalization.t("SSH 直配", "SSH", lang)) }
+                        label = { Text(AppLocalization.t("SSH 直配", "SSH", lang), maxLines = 1, softWrap = false) }
                     )
                     FilterChip(
                         selected = mode == 2,
                         onClick = { if (!busy) { mode = 2; errorMsg = null } },
-                        label = { Text(AppLocalization.t("PIN 配对", "PIN", lang)) }
+                        label = { Text(AppLocalization.t("PIN 码", "PIN", lang), maxLines = 1, softWrap = false) }
                     )
                 }
 
@@ -224,7 +224,8 @@ fun LinuxHostProfileDialog(
     var mode by remember { mutableStateOf(initialProfile.mode) }
     var display by remember { mutableStateOf(initialProfile.display) }
     var basePort by remember { mutableStateOf(initialProfile.basePort.toString()) }
-    var encoder by remember { mutableStateOf(initialProfile.encoder) }
+    var encoder by remember { mutableStateOf(initialProfile.encoder.ifBlank { "auto" }) }
+    var captureMethod by remember { mutableStateOf(initialProfile.captureMethod.ifBlank { "auto" }) }
     var drmNode by remember { mutableStateOf(initialProfile.drmRenderNode) }
     var virtualAudio by remember { mutableStateOf(initialProfile.virtualAudioSink) }
     var clipboardSync by remember { mutableStateOf(initialProfile.clipboardSync) }
@@ -233,22 +234,50 @@ fun LinuxHostProfileDialog(
 
     AlertDialog(
         onDismissRequest = { if (!busy) onDismiss() },
-        title = { Text(AppLocalization.t("Linux 多用户主机隔离配置", "Linux Host Isolation Profile", lang)) },
+        title = { Text(AppLocalization.t("远端主机编码与配置", "Remote Host Encoder & Profile", lang)) },
         text = {
             Column(
                 modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
+                Text(
+                    text = AppLocalization.t("视频编码器（双显卡 Linux 笔记本优先选 软编 或 自动）", "Video Encoder (pick Auto or Software for hybrid laptops)", lang),
+                    style = MaterialTheme.typography.labelMedium
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf("auto" to AppLocalization.t("自动", "Auto", lang), "nvenc" to "NVENC", "vaapi" to "VAAPI", "software" to AppLocalization.t("软编", "CPU", lang)).forEach { (id, lbl) ->
+                        FilterChip(
+                            selected = encoder.equals(id, ignoreCase = true),
+                            onClick = { encoder = id },
+                            label = { Text(lbl, maxLines = 1, softWrap = false) }
+                        )
+                    }
+                }
+
+                Text(
+                    text = AppLocalization.t("画面采集方式（Wayland 选 自动 / KMS，Xorg 选 X11）", "Capture Method (Auto / KMS for Wayland, X11 for Xorg)", lang),
+                    style = MaterialTheme.typography.labelMedium
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf("auto" to AppLocalization.t("自动", "Auto", lang), "kms" to "KMS", "x11" to "X11").forEach { (id, lbl) ->
+                        FilterChip(
+                            selected = captureMethod.equals(id, ignoreCase = true),
+                            onClick = { captureMethod = id },
+                            label = { Text(lbl, maxLines = 1, softWrap = false) }
+                        )
+                    }
+                }
+
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FilterChip(
                         selected = mode == LinuxHostDisplayMode.PHYSICAL_DESKTOP,
                         onClick = { mode = LinuxHostDisplayMode.PHYSICAL_DESKTOP },
-                        label = { Text(AppLocalization.t("物理桌面", "Physical", lang)) }
+                        label = { Text(AppLocalization.t("物理桌面", "Physical", lang), maxLines = 1, softWrap = false) }
                     )
                     FilterChip(
                         selected = mode == LinuxHostDisplayMode.ISOLATED_VIRTUAL_DESKTOP,
                         onClick = { mode = LinuxHostDisplayMode.ISOLATED_VIRTUAL_DESKTOP },
-                        label = { Text(AppLocalization.t("虚拟隔离桌面", "Isolated Virtual", lang)) }
+                        label = { Text(AppLocalization.t("虚拟隔离桌面", "Isolated", lang), maxLines = 1, softWrap = false) }
                     )
                 }
 
@@ -258,13 +287,6 @@ fun LinuxHostProfileDialog(
                     label = { Text(AppLocalization.t("起始端口 (Base Port)", "Base Port", lang)) },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    modifier = Modifier.fillMaxWidth()
-                )
-                OutlinedTextField(
-                    value = encoder,
-                    onValueChange = { encoder = it },
-                    label = { Text("Encoder (nvenc / vaapi / software)") },
-                    singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
                 if (mode == LinuxHostDisplayMode.ISOLATED_VIRTUAL_DESKTOP) {
@@ -313,7 +335,8 @@ fun LinuxHostProfileDialog(
                         mode = mode,
                         display = display.trim().ifBlank { ":99" },
                         basePort = basePort.toIntOrNull()?.coerceIn(1024, 65000) ?: 47989,
-                        encoder = encoder.trim().ifBlank { "nvenc" },
+                        encoder = encoder.trim().ifBlank { "auto" },
+                        captureMethod = captureMethod.trim().ifBlank { "auto" },
                         drmRenderNode = drmNode.trim(),
                         virtualAudioSink = virtualAudio,
                         clipboardSync = clipboardSync

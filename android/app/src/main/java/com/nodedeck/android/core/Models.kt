@@ -232,8 +232,9 @@ data class LinuxHostProfile(
     val mode: LinuxHostDisplayMode = LinuxHostDisplayMode.PHYSICAL_DESKTOP,
     val display: String = ":99",
     val basePort: Int = 47989,
-    val encoder: String = "nvenc",
-    val drmRenderNode: String = "/dev/dri/renderD128",
+    val encoder: String = "auto",
+    val captureMethod: String = "auto",
+    val drmRenderNode: String = "",
     val virtualAudioSink: Boolean = false,
     val clipboardSync: Boolean = true
 )

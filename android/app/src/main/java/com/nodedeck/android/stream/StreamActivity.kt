@@ -1099,6 +1099,18 @@ private fun StreamScreen(
                                     style = MaterialTheme.typography.bodySmall,
                                     color = Color(0xFFFF9B9B)
                                 )
+                                val lower = s.reason.lowercase()
+                                if (lower.contains("encoder") || lower.contains("capture") || lower.contains("display") || lower.contains("declined")) {
+                                    Text(
+                                        text = AppLocalization.t(
+                                            "排查建议：请确认目标电脑屏幕未息屏休眠；若是双显卡 Linux 笔记本，请返回点击「多用户配置」或在电脑端 NodeDeck 点击本机被控 ⚙ 切换编码器（推荐「软编」或「自动」）后重试。",
+                                            "Tip: Ensure the host display is awake. On hybrid-GPU Linux laptops, return and open Host Profile (or ⚙ on the PC) to switch Encoder to Software or Auto.",
+                                            lang
+                                        ),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = Color(0xFFFFD68A)
+                                    )
+                                }
                             }
                             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                                 Button(onClick = onReconnect) {
