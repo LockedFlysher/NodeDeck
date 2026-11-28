@@ -298,9 +298,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun mergeAccountHostDevices(devices: List<ControlPlaneDevice>, selfDeviceId: String) {
+        val desktopPlatforms = setOf("linux", "macos", "windows")
         val hostDevices = devices.filter {
             it.deviceId != selfDeviceId &&
-                (it.role == "host" || it.role == "both") &&
+                (it.role == "host" || it.role == "both" || it.platform.lowercase() in desktopPlatforms) &&
                 it.virtualIp.isNotBlank()
         }
         if (hostDevices.isEmpty()) return
@@ -511,6 +512,63 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private suspend fun probeHostSnapshot(host: SSHHost, cur: HostSnapshot): HostSnapshot {
+        val (metrics, rtt, err) = refreshSemaphore.withPermit {
+            sshManager.collectMetrics(host, _hosts.value)
+        }
+        val displayRtt = resolveBestLatencyMs(host, rtt)
+        if (metrics != null) {
+            return cur.copy(
+                host = host,
+                state = HostConnectionState.ONLINE,
+                metrics = metrics,
+                latencyMs = displayRtt,
+                errorMessage = null,
+                lastUpdatedMs = System.currentTimeMillis()
+            )
+        }
+
+        // Mode A fallback: a PC joined via NodeDeck Account may not run sshd, yet still be online for remote desktop.
+        val knownCfg = sunshineForHost(host)
+        val probeAddr = knownCfg?.address?.ifBlank { host.hostName } ?: host.hostName
+        val probePort = knownCfg?.httpPort ?: 47989
+        val startNs = System.nanoTime()
+        val serverInfo = runCatching {
+            sunshineClient.fetchServerInfo(probeAddr, probePort)
+        }.getOrNull()
+        if (serverInfo != null) {
+            val probeMs = (System.nanoTime() - startNs) / 1_000_000.0
+            val bestMs = resolveBestLatencyMs(host, probeMs)
+            if (serverInfo.pairStatus && knownCfg == null) {
+                upsertSunshineConfig(
+                    SunshineHostConfig(
+                        hostAlias = host.alias,
+                        address = probeAddr,
+                        httpPort = probePort,
+                        httpsPort = serverInfo.httpsPort,
+                        serverName = serverInfo.hostname.ifBlank { host.alias },
+                        isPaired = true
+                    )
+                )
+            }
+            return cur.copy(
+                host = host,
+                state = HostConnectionState.ONLINE,
+                latencyMs = bestMs,
+                errorMessage = null,
+                lastUpdatedMs = System.currentTimeMillis()
+            )
+        }
+
+        return cur.copy(
+            host = host,
+            state = HostConnectionState.OFFLINE,
+            latencyMs = displayRtt,
+            errorMessage = err ?: "Offline",
+            lastUpdatedMs = System.currentTimeMillis()
+        )
+    }
+
     fun refreshHost(hostId: String) {
         val host = _hosts.value.firstOrNull { it.id == hostId } ?: return
         viewModelScope.launch {
@@ -518,31 +576,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val cur = map[hostId] ?: HostSnapshot(host = host)
                 map + (hostId to cur.copy(host = host, state = HostConnectionState.CHECKING, errorMessage = null))
             }
-            val (metrics, rtt, err) = refreshSemaphore.withPermit {
-                sshManager.collectMetrics(host, _hosts.value)
-            }
-            val displayRtt = resolveBestLatencyMs(host, rtt)
-            _snapshots.update { map ->
-                val cur = map[hostId] ?: HostSnapshot(host = host)
-                if (metrics != null) {
-                    map + (hostId to cur.copy(
-                        host = host,
-                        state = HostConnectionState.ONLINE,
-                        metrics = metrics,
-                        latencyMs = displayRtt,
-                        errorMessage = null,
-                        lastUpdatedMs = System.currentTimeMillis()
-                    ))
-                } else {
-                    map + (hostId to cur.copy(
-                        host = host,
-                        state = HostConnectionState.OFFLINE,
-                        latencyMs = displayRtt,
-                        errorMessage = err ?: "Offline",
-                        lastUpdatedMs = System.currentTimeMillis()
-                    ))
-                }
-            }
+            val current = _snapshots.value[hostId] ?: HostSnapshot(host = host)
+            val updated = probeHostSnapshot(host, current)
+            _snapshots.update { map -> map + (hostId to updated) }
         }
     }
 
@@ -558,31 +594,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             val cur = map[host.id] ?: HostSnapshot(host = host)
                             map + (host.id to cur.copy(host = host, state = HostConnectionState.CHECKING))
                         }
-                        val (metrics, rtt, err) = refreshSemaphore.withPermit {
-                            sshManager.collectMetrics(host, _hosts.value)
-                        }
-                        val displayRtt = resolveBestLatencyMs(host, rtt)
-                        _snapshots.update { map ->
-                            val cur = map[host.id] ?: HostSnapshot(host = host)
-                            if (metrics != null) {
-                                map + (host.id to cur.copy(
-                                    host = host,
-                                    state = HostConnectionState.ONLINE,
-                                    metrics = metrics,
-                                    latencyMs = displayRtt,
-                                    errorMessage = null,
-                                    lastUpdatedMs = System.currentTimeMillis()
-                                ))
-                            } else {
-                                map + (host.id to cur.copy(
-                                    host = host,
-                                    state = HostConnectionState.OFFLINE,
-                                    latencyMs = displayRtt,
-                                    errorMessage = err ?: "Offline",
-                                    lastUpdatedMs = System.currentTimeMillis()
-                                ))
-                            }
-                        }
+                        val current = _snapshots.value[host.id] ?: HostSnapshot(host = host)
+                        val updated = probeHostSnapshot(host, current)
+                        _snapshots.update { map -> map + (host.id to updated) }
                     }
                 }
                 jobs.forEach { it.join() }
@@ -673,6 +687,114 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val next = _sunshineConfigs.value.filterNot { it.hostAlias.equals(hostAlias, ignoreCase = true) }
         _sunshineConfigs.value = next
         store.saveSunshineHosts(next)
+    }
+
+    fun pairViaAccount(
+        host: SSHHost,
+        onResult: (Result<SunshineHostConfig>) -> Unit
+    ) {
+        viewModelScope.launch {
+            val res = runCatching {
+                val sess = _accountSession.value
+                if (!sess.isLoggedIn) {
+                    throw IllegalStateException(
+                        AppLocalization.t(
+                            "请先登录 NodeDeck 账号后再使用账号一键激活。",
+                            "Please sign in to your NodeDeck account first."
+                        )
+                    )
+                }
+
+                // 1. Always ensure this phone's Moonlight client cert is registered in the control plane
+                val devName = sess.deviceName.ifBlank { ControlPlaneClient.defaultDeviceName() }
+                val (uid, certPem) = withContext(Dispatchers.IO) { sunshineClient.getPublicIdentity() }
+                controlPlaneClient.registerClientCert(
+                    serverUrl = sess.serverUrl,
+                    token = sess.token,
+                    deviceName = devName,
+                    uniqueId = uid,
+                    certPem = certPem
+                )
+
+                // 2. Dispatch activate_host command to target PC under the same account (zero SSH, zero sudo, zero PIN)
+                val matchedDev = _accountDevices.value.firstOrNull {
+                    it.virtualIp.equals(host.hostName, ignoreCase = true) ||
+                        it.deviceName.equals(host.alias, ignoreCase = true)
+                }
+                val act = controlPlaneClient.activateDevice(
+                    serverUrl = sess.serverUrl,
+                    token = sess.token,
+                    targetDeviceId = matchedDev?.deviceId.orEmpty(),
+                    targetIp = host.hostName,
+                    targetName = host.alias,
+                    action = "activate_host"
+                )
+
+                val addr = act.targetDevice.virtualIp.ifBlank { host.hostName }
+                var httpPort = if (act.targetDevice.sunshineHttpPort > 0) act.targetDevice.sunshineHttpPort else 47989
+                var httpsPort = if (act.targetDevice.sunshineHttpsPort > 0) act.targetDevice.sunshineHttpsPort else (httpPort - 5).coerceAtLeast(1)
+                var completed = false
+
+                // 3. Wait up to 16 seconds for the target PC's background heartbeat agent to apply cert + start host
+                for (attempt in 0 until 16) {
+                    delay(1_000L)
+                    val st = runCatching {
+                        controlPlaneClient.getCommandStatus(sess.serverUrl, sess.token, act.commandId)
+                    }.getOrNull()
+                    if (st != null) {
+                        when (st.status) {
+                            "done" -> {
+                                st.result.sunshineHttpPort?.takeIf { it > 0 }?.let { httpPort = it }
+                                st.result.sunshineHttpsPort?.takeIf { it > 0 }?.let { httpsPort = it }
+                                completed = true
+                                break
+                            }
+                            "failed" -> {
+                                throw IllegalStateException(
+                                    st.result.error?.takeIf { it.isNotBlank() }
+                                        ?: AppLocalization.t("目标设备执行远控激活失败", "Target device failed to activate remote host")
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // 4. Fallback verification: if command timed out, check if Sunshine is already directly reachable & paired
+                if (!completed) {
+                    val info = runCatching { sunshineClient.fetchServerInfo(addr, httpPort) }.getOrNull()
+                    if (info != null && info.pairStatus) {
+                        httpsPort = info.httpsPort
+                    } else {
+                        throw IllegalStateException(
+                            AppLocalization.t(
+                                "已发送激活指令，但目标设备 16 秒内未响应。请确认电脑端 NodeDeck 已打开并登录同一账号（${sess.username}）。",
+                                "Activation command sent, but target device did not respond within 16s. Ensure NodeDeck is running and signed in to ${sess.username} on that PC."
+                            )
+                        )
+                    }
+                }
+
+                val cfg = SunshineHostConfig(
+                    hostAlias = host.alias,
+                    address = addr,
+                    httpPort = httpPort,
+                    httpsPort = httpsPort,
+                    serverName = act.targetDevice.deviceName.ifBlank { host.alias },
+                    isPaired = true
+                )
+                upsertSunshineConfig(cfg)
+                refreshHost(host.id)
+                syncAccountState()
+                postFeedback(
+                    AppLocalization.t(
+                        "账号一键激活配对成功 (${cfg.address}:${cfg.httpPort})",
+                        "Account 1-tap activation succeeded (${cfg.address}:${cfg.httpPort})"
+                    )
+                )
+                cfg
+            }
+            onResult(res)
+        }
     }
 
     fun pairZeroPinViaSsh(

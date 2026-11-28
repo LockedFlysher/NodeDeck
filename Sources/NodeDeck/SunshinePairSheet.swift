@@ -13,6 +13,7 @@ struct SunshinePairSheet: View {
     @State private var httpPortText: String
     @State private var username: String
     @State private var password: String = ""
+    @State private var isActivatingByAccount = false
     @State private var isPairing = false
     @State private var statusMessage: String?
     @State private var errorMessage: String?
@@ -43,15 +44,65 @@ struct SunshinePairSheet: View {
                 .frame(width: 34, height: 34)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(l10n.t("SSH 免 PIN 自动配对", "Zero-PIN SSH Auto Pairing"))
+                    Text(l10n.t("配对并激活远程桌面主机", "Activate & Pair Remote Host"))
                         .font(.headline)
                     Text(l10n.t(
-                        "通过 SSH 校验 \(host.alias) 权限后直接注入本机客户端证书，无需浏览器输入 PIN 码。",
-                        "Verifies credentials over your SSH session to \(host.alias) and injects your local client cert directly."
+                        "优先使用 NodeDeck 同账号免密激活 \(host.alias)；未登录同账号时可使用下方 SSH 备用方式。",
+                        "Prefer 1-tap same-account activation for \(host.alias); fall back to SSH only if needed."
                     ))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+            }
+
+            if store.accountSession.isLoggedIn {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "person.badge.key.fill")
+                            .foregroundStyle(.green)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(l10n.t("账号一键激活配对（推荐 · 免 SSH / 免密码）", "1-Tap Account Activation (No SSH / No Password)"))
+                                .font(.system(size: 12.5, weight: .semibold))
+                            Text(l10n.t(
+                                "使用当前账号（\(store.accountSession.username)）自动同步本机证书并唤起远端被控服务，全程无需 sudo 或系统密码。",
+                                "Uses your signed-in account (\(store.accountSession.username)) to sync certs and start remote host automatically."
+                            ))
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    Button {
+                        startAccountActivation()
+                    } label: {
+                        HStack(spacing: 6) {
+                            if isActivatingByAccount {
+                                ProgressView().controlSize(.small)
+                            } else {
+                                Image(systemName: "bolt.shield.fill")
+                            }
+                            Text(
+                                isActivatingByAccount
+                                    ? l10n.t("正在通过账号激活远端被控…", "Activating via Account…")
+                                    : l10n.t("账号一键激活并配对 \(host.alias)", "Activate & Pair \(host.alias) via Account")
+                            )
+                            .fontWeight(.semibold)
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.green)
+                    .disabled(isActivatingByAccount || isPairing)
+                }
+                .padding(11)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Color.green.opacity(0.09))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .strokeBorder(Color.green.opacity(0.28), lineWidth: 1)
+                )
             }
 
             HStack(spacing: 8) {
@@ -59,8 +110,8 @@ struct SunshinePairSheet: View {
                     .foregroundStyle(AppTheme.accent)
                     .font(.caption)
                 Text(l10n.t(
-                    "安全说明：密码仅用于本次 SSH 校验，绝不落盘、不经第三方云端服务器。",
-                    "Security note: Your password is used strictly for this SSH check—never saved or sent to any cloud."
+                    "备用方式（SSH 免 PIN 配对）：仅当目标主机未登录同一 NodeDeck 账号时才需填写 SSH 密码；密码不落盘。",
+                    "Fallback (Zero-PIN SSH): Only needed if target host isn't signed in to the same NodeDeck account."
                 ))
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
@@ -116,7 +167,7 @@ struct SunshinePairSheet: View {
 
             if let statusMessage {
                 HStack(spacing: 8) {
-                    if isPairing {
+                    if isPairing || isActivatingByAccount {
                         ProgressView().controlSize(.small)
                     }
                     Text(statusMessage)
@@ -148,14 +199,14 @@ struct SunshinePairSheet: View {
                 Button(l10n.t("取消", "Cancel")) { dismiss() }
                     .keyboardShortcut(.cancelAction)
 
-                Button(isPairing ? l10n.t("正在自动配对…", "Pairing…") : l10n.t("登录并自动配对", "Verify & Auto Pair")) {
+                Button(isPairing ? l10n.t("正在 SSH 配对…", "Pairing…") : l10n.t("SSH 备用配对", "SSH Fallback Pair")) {
                     startAutoPairing()
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(AppTheme.accent)
                 .keyboardShortcut(.defaultAction)
                 .disabled(
-                    isPairing ||
+                    isPairing || isActivatingByAccount ||
                         address.trimmingCharacters(in: .whitespaces).isEmpty ||
                         username.trimmingCharacters(in: .whitespaces).isEmpty ||
                         password.isEmpty
@@ -163,7 +214,28 @@ struct SunshinePairSheet: View {
             }
         }
         .padding(20)
-        .frame(width: 460)
+        .frame(width: 480)
+    }
+
+    private func startAccountActivation() {
+        isActivatingByAccount = true
+        errorMessage = nil
+        statusMessage = l10n.t(
+            "正在下发账号激活指令并同步本机证书到 \(host.alias)（最多等待 15 秒）…",
+            "Sending account activation command & syncing client cert to \(host.alias)…"
+        )
+
+        Task {
+            do {
+                _ = try await store.activateDeviceViaAccount(for: host)
+                isActivatingByAccount = false
+                dismiss()
+            } catch {
+                isActivatingByAccount = false
+                statusMessage = nil
+                errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            }
+        }
     }
 
     private func startAutoPairing() {

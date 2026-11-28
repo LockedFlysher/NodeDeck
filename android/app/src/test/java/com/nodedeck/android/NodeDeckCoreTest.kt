@@ -1,5 +1,6 @@
 package com.nodedeck.android
 
+import com.nodedeck.android.core.ControlPlaneClient
 import com.nodedeck.android.core.RemoteMetricsParser
 import com.nodedeck.android.core.SshConfigParser
 import com.nodedeck.android.core.StreamQualityMath
@@ -145,5 +146,55 @@ class NodeDeckCoreTest {
         assertEquals(1.0f, vp.zoomScale, 0.001f)
         assertEquals(0f, vp.panX, 0.001f)
         assertEquals(0f, vp.panY, 0.001f)
+    }
+
+    @Test
+    fun testControlPlaneActivateAndCommandStatusJson() {
+        val client = ControlPlaneClient()
+        val actJson = """
+            {
+              "ok": true,
+              "command_id": 42,
+              "status": "pending",
+              "target_device": {
+                "device_id": "linux-box-1",
+                "device_name": "ubuntu-desktop",
+                "platform": "linux",
+                "role": "both",
+                "virtual_ip": "10.66.0.12",
+                "sunshine_http_port": 47989,
+                "sunshine_https_port": 47984,
+                "sunshine_enabled": false,
+                "online": true
+              }
+            }
+        """.trimIndent()
+        val act = client.decodeActivateResponse(actJson)
+        assertTrue(act.ok)
+        assertEquals(42, act.commandId)
+        assertEquals("pending", act.status)
+        assertEquals("10.66.0.12", act.targetDevice.virtualIp)
+        assertEquals(47989, act.targetDevice.sunshineHttpPort)
+
+        val statusJson = """
+            {
+              "id": 42,
+              "target_device_id": "linux-box-1",
+              "action": "activate_host",
+              "status": "done",
+              "result": {
+                "sunshine_enabled": true,
+                "sunshine_http_port": 48089,
+                "sunshine_https_port": 48084
+              },
+              "updated_at": 1764300000
+            }
+        """.trimIndent()
+        val st = client.decodeCommandStatus(statusJson)
+        assertEquals(42, st.id)
+        assertEquals("done", st.status)
+        assertEquals(true, st.result.sunshineEnabled)
+        assertEquals(48089, st.result.sunshineHttpPort)
+        assertEquals(48084, st.result.sunshineHttpsPort)
     }
 }

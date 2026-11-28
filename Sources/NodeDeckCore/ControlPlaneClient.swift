@@ -83,6 +83,71 @@ public struct ControlPlaneSshKey: Codable, Equatable, Sendable {
     }
 }
 
+public struct ControlPlaneCommand: Codable, Equatable, Sendable {
+    public let id: Int
+    public let senderDeviceId: String
+    public let action: String
+    public let createdAt: Int64
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case senderDeviceId = "sender_device_id"
+        case action
+        case createdAt = "created_at"
+    }
+}
+
+public struct ControlPlaneActivateResponse: Codable, Sendable {
+    public let ok: Bool
+    public let commandId: Int
+    public let status: String
+    public let targetDevice: ControlPlaneDevice?
+
+    enum CodingKeys: String, CodingKey {
+        case ok
+        case commandId = "command_id"
+        case status
+        case targetDevice = "target_device"
+    }
+}
+
+public struct ControlPlaneCommandStatus: Codable, Sendable {
+    public let id: Int
+    public let status: String
+    public let action: String
+    public let sunshineHttpPort: Int?
+    public let sunshineHttpsPort: Int?
+    public let error: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, status, action, result
+    }
+
+    private struct ResultPayload: Codable {
+        let sunshine_http_port: Int?
+        let sunshine_https_port: Int?
+        let error: String?
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(Int.self, forKey: .id)
+        status = try c.decode(String.self, forKey: .status)
+        action = try c.decodeIfPresent(String.self, forKey: .action) ?? ""
+        let r = try c.decodeIfPresent(ResultPayload.self, forKey: .result)
+        sunshineHttpPort = r?.sunshine_http_port
+        sunshineHttpsPort = r?.sunshine_https_port
+        error = r?.error
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(status, forKey: .status)
+        try c.encode(action, forKey: .action)
+    }
+}
+
 public struct ControlPlaneStateResponse: Codable, Sendable {
     public let token: String?
     public let user: ControlPlaneUser
@@ -91,11 +156,13 @@ public struct ControlPlaneStateResponse: Codable, Sendable {
     public let devices: [ControlPlaneDevice]
     public let clientCerts: [ControlPlaneClientCert]
     public let sshPublicKeys: [ControlPlaneSshKey]
+    public let pendingCommands: [ControlPlaneCommand]
 
     enum CodingKeys: String, CodingKey {
         case token, user, device, mesh, devices
         case clientCerts = "client_certs"
         case sshPublicKeys = "ssh_public_keys"
+        case pendingCommands = "pending_commands"
     }
 
     public init(from decoder: Decoder) throws {
@@ -107,6 +174,7 @@ public struct ControlPlaneStateResponse: Codable, Sendable {
         devices = try c.decodeIfPresent([ControlPlaneDevice].self, forKey: .devices) ?? []
         clientCerts = try c.decodeIfPresent([ControlPlaneClientCert].self, forKey: .clientCerts) ?? []
         sshPublicKeys = try c.decodeIfPresent([ControlPlaneSshKey].self, forKey: .sshPublicKeys) ?? []
+        pendingCommands = try c.decodeIfPresent([ControlPlaneCommand].self, forKey: .pendingCommands) ?? []
     }
 }
 
@@ -307,6 +375,77 @@ public final class ControlPlaneClient: Sendable {
             let text = String(data: data, encoding: .utf8) ?? "HTTP \(http.statusCode)"
             throw ControlPlaneError.serverError(text)
         }
+    }
+
+    public func activateDevice(
+        serverUrl: String,
+        token: String,
+        targetDeviceId: String = "",
+        targetName: String = "",
+        targetIp: String = "",
+        action: String = "activate_host"
+    ) async throws -> ControlPlaneActivateResponse {
+        let base = serverUrl.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
+        guard let url = URL(string: "\(base)/api/v1/devices/activate") else {
+            throw ControlPlaneError.invalidURL
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        let body: [String: Any] = [
+            "target_device_id": targetDeviceId,
+            "target_name": targetName,
+            "target_ip": targetIp,
+            "action": action
+        ]
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (data, resp) = try await session.data(for: req)
+        if let http = resp as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+            if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let err = obj["error"] as? String, !err.isEmpty {
+                throw ControlPlaneError.serverError(err)
+            }
+            throw ControlPlaneError.serverError("HTTP \(http.statusCode)")
+        }
+        return try JSONDecoder().decode(ControlPlaneActivateResponse.self, from: data)
+    }
+
+    public func getCommandStatus(
+        serverUrl: String,
+        token: String,
+        commandId: Int
+    ) async throws -> ControlPlaneCommandStatus {
+        let base = serverUrl.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
+        guard let url = URL(string: "\(base)/api/v1/commands/\(commandId)") else {
+            throw ControlPlaneError.invalidURL
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "GET"
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        let (data, resp) = try await session.data(for: req)
+        if let http = resp as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+            throw ControlPlaneError.serverError("HTTP \(http.statusCode)")
+        }
+        return try JSONDecoder().decode(ControlPlaneCommandStatus.self, from: data)
+    }
+
+    public func ackCommand(
+        serverUrl: String,
+        token: String,
+        commandId: Int,
+        status: String,
+        result: [String: Any]
+    ) async {
+        let base = serverUrl.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
+        guard let url = URL(string: "\(base)/api/v1/commands/\(commandId)/ack") else { return }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        let body: [String: Any] = ["status": status, "result": result]
+        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        _ = try? await session.data(for: req)
     }
 
     public func logout(serverUrl: String, token: String) async {

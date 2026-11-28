@@ -126,6 +126,7 @@ def detect_sunshine_config(target_user: str) -> tuple[bool, int, int, Path | Non
         home = Path.home()
 
     candidates = [
+        (home / ".config/nodedeck", "host.conf"),
         (home / ".config/nodedeck/host", "host.conf"),
         (home / ".config/sunshine", "sunshine.conf"),
     ]
@@ -138,13 +139,54 @@ def detect_sunshine_config(target_user: str) -> tuple[bool, int, int, Path | Non
             https_port = max(1, http_port - 5)
             m_state = re.search(r"^\s*file_state\s*=\s*(.+)$", txt, re.M)
             if m_state:
-                state_path = Path(m_state.group(1).strip())
+                raw_state = m_state.group(1).strip().replace("$HOME", str(home))
+                state_path = Path(raw_state)
                 if not state_path.is_absolute():
                     state_path = conf_dir / state_path
             else:
-                state_path = conf_dir / "sunshine_state.json"
+                state_path = conf_dir / ("host_state.json" if conf_name == "host.conf" else "sunshine_state.json")
             return True, http_port, https_port, conf_dir, state_path
     return False, 47989, 47984, None, None
+
+
+def ensure_default_sunshine_config(target_user: str) -> tuple[bool, int, int, Path | None, Path | None]:
+    """Ensure a brand-new Linux host initializes default nodedeck-host config on account sign-in (zero sudo)."""
+    enabled, hp, hsp, conf_dir, state_path = detect_sunshine_config(target_user)
+    if enabled:
+        return enabled, hp, hsp, conf_dir, state_path
+    host_bin = Path("/opt/nodedeck/host/bin/nodedeck-host")
+    if not host_bin.is_file():
+        return False, 47989, 47984, None, None
+    try:
+        pw = pwd.getpwnam(target_user)
+        home, uid, gid = Path(pw.pw_dir), pw.pw_uid, pw.pw_gid
+    except KeyError:
+        home, uid, gid = Path.home(), -1, -1
+
+    cfg_dir = home / ".config/nodedeck"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    apps_file = cfg_dir / "apps.json"
+    conf_file = cfg_dir / "host.conf"
+    state_file = cfg_dir / "host_state.json"
+    if not apps_file.exists():
+        apps_file.write_text('{\n  "env": {},\n  "apps": [{ "name": "Desktop", "image-path": "desktop.png" }]\n}\n', encoding="utf-8")
+    if not conf_file.exists():
+        conf_file.write_text(
+            f"port = 47989\n"
+            f"file_apps = {apps_file}\n"
+            f"file_state = {state_file}\n"
+            f"credentials_file = {cfg_dir / 'credentials.json'}\n"
+            f"pkey = {cfg_dir / 'host.key'}\n"
+            f"cert = {cfg_dir / 'host.cert'}\n",
+            encoding="utf-8",
+        )
+    if os.geteuid() == 0 and uid >= 0:
+        for p in (cfg_dir, apps_file, conf_file):
+            try:
+                os.chown(p, uid, gid)
+            except Exception:
+                pass
+    return True, 47989, 47984, cfg_dir, state_file
 
 
 def sync_client_certs_to_sunshine(target_user: str, client_certs: list[dict[str, Any]]) -> bool:
@@ -316,36 +358,148 @@ def register_local_ssh_pubkey(server_url: str, token: str, device_name: str, tar
         print(f"[nodedeck-mesh] ssh-key register warning: {exc}", flush=True)
 
 
-def reload_user_sunshine(target_user: str) -> None:
+def reload_user_sunshine(target_user: str, start_if_stopped: bool = False) -> bool:
     try:
         pw = pwd.getpwnam(target_user)
         uid = pw.pw_uid
+        home = Path(pw.pw_dir)
     except KeyError:
-        return
-    for svc in ("nodedeck-host", "foundation-sunshine", "sunshine"):
-        env = os.environ.copy()
-        env["XDG_RUNTIME_DIR"] = f"/run/user/{uid}"
-        env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path=/run/user/{uid}/bus"
+        uid = os.getuid()
+        home = Path.home()
+
+    env = os.environ.copy()
+    env["XDG_RUNTIME_DIR"] = f"/run/user/{uid}"
+    env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path=/run/user/{uid}/bus"
+
+    def _run_systemctl(*sc_args: str) -> subprocess.CompletedProcess:
         if os.geteuid() == 0 and uid != 0:
-            check = subprocess.run(
-                ["runuser", "-u", target_user, "--", "env", f"XDG_RUNTIME_DIR=/run/user/{uid}",
+            return subprocess.run(
+                ["runuser", "-u", target_user, "--", "env",
+                 f"XDG_RUNTIME_DIR=/run/user/{uid}",
                  f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus",
-                 "systemctl", "--user", "is-active", "--quiet", svc],
+                 "systemctl", "--user", *sc_args],
                 capture_output=True,
             )
-            if check.returncode == 0:
-                subprocess.run(
-                    ["runuser", "-u", target_user, "--", "env", f"XDG_RUNTIME_DIR=/run/user/{uid}",
-                     f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus",
-                     "systemctl", "--user", "restart", svc],
-                    capture_output=True,
+        return subprocess.run(["systemctl", "--user", *sc_args], env=env, capture_output=True)
+
+    for svc in ("nodedeck-host", "foundation-sunshine", "sunshine"):
+        if _run_systemctl("is-active", "--quiet", svc).returncode == 0:
+            _run_systemctl("restart", svc)
+            return True
+
+    if start_if_stopped:
+        # Try systemd --user nodedeck-host.service first
+        if _run_systemctl("start", "nodedeck-host.service").returncode == 0:
+            return True
+        # Fallback: start bundled nodedeck-host directly in user space
+        host_bin = Path("/opt/nodedeck/host/bin/nodedeck-host")
+        enabled, _, _, conf_dir, _ = ensure_default_sunshine_config(target_user)
+        if enabled and conf_dir is not None and host_bin.is_file():
+            conf_file = conf_dir / "host.conf"
+            if conf_file.exists():
+                subprocess.run(["pkill", "-x", "nodedeck-host"], capture_output=True)
+                log_path = conf_dir / "nodedeck-host.log"
+                try:
+                    with open(log_path, "ab") as logf:
+                        subprocess.Popen(
+                            [str(host_bin), str(conf_file)],
+                            cwd=str(conf_dir),
+                            stdout=logf,
+                            stderr=logf,
+                            stdin=subprocess.DEVNULL,
+                            start_new_session=True,
+                        )
+                    return True
+                except Exception:
+                    pass
+    return False
+
+
+def ensure_user_mesh_daemon_running(state_dir: Path) -> None:
+    """Start user-space nodedeck-mesh daemon without sudo (uses cap_net_admin on easytier-core)."""
+    if os.geteuid() == 0:
+        return
+    # Skip if system-level nodedeck-mesh.service is already active and sharing /etc/nodedeck
+    if subprocess.run(["systemctl", "is-active", "--quiet", "nodedeck-mesh.service"], capture_output=True).returncode == 0:
+        return
+    uid = os.getuid()
+    env = os.environ.copy()
+    env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{uid}")
+    env.setdefault("DBUS_SESSION_BUS_ADDRESS", f"unix:path=/run/user/{uid}/bus")
+    if subprocess.run(["systemctl", "--user", "enable", "--now", "nodedeck-mesh.service"], env=env, capture_output=True).returncode == 0:
+        return
+    # Fallback: launch detached user-space daemon directly if not already running
+    chk = subprocess.run(["pgrep", "-u", str(uid), "-f", "nodedeck_mesh_agent.py daemon"], capture_output=True)
+    if chk.returncode != 0:
+        log_path = state_dir / "mesh-daemon.log"
+        try:
+            with open(log_path, "ab") as logf:
+                subprocess.Popen(
+                    [sys.executable, str(Path(__file__).resolve()), "--state-dir", str(state_dir), "daemon"],
+                    stdout=logf,
+                    stderr=logf,
+                    stdin=subprocess.DEVNULL,
+                    start_new_session=True,
                 )
-                return
-        else:
-            check = subprocess.run(["systemctl", "--user", "is-active", "--quiet", svc], env=env, capture_output=True)
-            if check.returncode == 0:
-                subprocess.run(["systemctl", "--user", "restart", svc], env=env, capture_output=True)
-                return
+        except Exception:
+            pass
+
+
+def process_pending_commands(
+    server_url: str,
+    token: str,
+    target_user: str,
+    client_certs: list[dict[str, Any]],
+    pending_commands: list[dict[str, Any]],
+) -> None:
+    """Execute account-authorized remote activation/cert-sync commands (zero SSH, zero sudo)."""
+    for cmd in pending_commands:
+        cmd_id = cmd.get("id")
+        action = str(cmd.get("action") or "")
+        if not cmd_id or action not in ("activate_host", "sync_certs"):
+            continue
+        try:
+            enabled, http_port, https_port, _, _ = ensure_default_sunshine_config(target_user)
+            if not enabled:
+                api_request(
+                    server_url,
+                    "POST",
+                    f"/api/v1/commands/{cmd_id}/ack",
+                    payload={"status": "failed", "result": {"error": "nodedeck-host binary not installed on this device"}},
+                    token=token,
+                )
+                continue
+            reloaded = sync_client_certs_to_sunshine(target_user, client_certs) if client_certs else False
+            if action == "activate_host":
+                running = subprocess.run(["pgrep", "-x", "nodedeck-host"], capture_output=True).returncode == 0
+                if not running or not reloaded:
+                    reload_user_sunshine(target_user, start_if_stopped=True)
+            api_request(
+                server_url,
+                "POST",
+                f"/api/v1/commands/{cmd_id}/ack",
+                payload={
+                    "status": "done",
+                    "result": {
+                        "sunshine_enabled": True,
+                        "sunshine_http_port": http_port,
+                        "sunshine_https_port": https_port,
+                    },
+                },
+                token=token,
+            )
+            print(f"[nodedeck-mesh] Executed account command #{cmd_id} ({action}) -> port {http_port}", flush=True)
+        except Exception as exc:
+            try:
+                api_request(
+                    server_url,
+                    "POST",
+                    f"/api/v1/commands/{cmd_id}/ack",
+                    payload={"status": "failed", "result": {"error": str(exc)}},
+                    token=token,
+                )
+            except Exception:
+                pass
 
 
 def api_request(
@@ -450,7 +604,8 @@ def cmd_auth(args: argparse.Namespace, is_register: bool) -> int:
     device_id = args.device_id or existing.get("device", {}).get("device_id") or f"linux-{socket.gethostname()}-{secrets.token_hex(4)}"
     device_name = args.name or socket.gethostname()
     ssh_user = args.ssh_user or os.environ.get("SUDO_USER") or getpass.getuser()
-    sunshine_enabled, http_port, https_port, _, _ = detect_sunshine_config(ssh_user)
+    # Plan A / Mode A: auto-initialize host config on brand-new PCs so account login immediately enables zero-PIN pairing
+    sunshine_enabled, http_port, https_port, _, _ = ensure_default_sunshine_config(ssh_user)
 
     body: dict[str, Any] = {
         "username": args.username,
@@ -458,7 +613,7 @@ def cmd_auth(args: argparse.Namespace, is_register: bool) -> int:
         "device_id": device_id,
         "device_name": device_name,
         "platform": "linux",
-        "role": args.role,
+        "role": "both" if sunshine_enabled else args.role,
         "ssh_user": ssh_user,
         "ssh_port": args.ssh_port,
         "sunshine_http_port": http_port,
@@ -477,14 +632,17 @@ def cmd_auth(args: argparse.Namespace, is_register: bool) -> int:
     resp["ssh_user"] = ssh_user
     save_session(state_dir, resp)
 
-    if sunshine_enabled and resp.get("client_certs"):
-        synced = sync_client_certs_to_sunshine(ssh_user, resp["client_certs"])
-        if synced:
-            print(f"[nodedeck-mesh] Synced {len(resp['client_certs'])} client certificate(s) to Sunshine", flush=True)
+    if sunshine_enabled:
+        if resp.get("client_certs"):
+            synced = sync_client_certs_to_sunshine(ssh_user, resp["client_certs"])
+            if synced:
+                print(f"[nodedeck-mesh] Synced {len(resp['client_certs'])} client certificate(s) to Sunshine", flush=True)
+        reload_user_sunshine(ssh_user, start_if_stopped=True)
     register_local_ssh_pubkey(args.server, resp["token"], resp["device"]["device_name"], ssh_user)
     if resp.get("ssh_public_keys"):
         if sync_ssh_keys_to_authorized_keys(ssh_user, resp["ssh_public_keys"]):
             print(f"[nodedeck-mesh] Synced {len(resp['ssh_public_keys'])} account SSH key(s)", flush=True)
+    ensure_user_mesh_daemon_running(state_dir)
 
     dev = resp["device"]
     print(f"Signed in as {resp['user']['username']} -> {dev['device_name']} ({dev['virtual_cidr']})")
@@ -577,6 +735,8 @@ def cmd_daemon(args: argparse.Namespace) -> int:
             sess = hb
             if sunshine_enabled and hb.get("client_certs"):
                 sync_client_certs_to_sunshine(ssh_user, hb["client_certs"])
+            if hb.get("pending_commands"):
+                process_pending_commands(sess["server_url"], sess["token"], ssh_user, hb.get("client_certs") or [], hb["pending_commands"])
             register_local_ssh_pubkey(sess["server_url"], sess["token"], hb["device"]["device_name"], ssh_user)
             if hb.get("ssh_public_keys"):
                 sync_ssh_keys_to_authorized_keys(ssh_user, hb["ssh_public_keys"])
@@ -632,7 +792,7 @@ def cmd_daemon(args: argparse.Namespace) -> int:
                     child = None
                     break
 
-            if time.time() - last_hb >= 30.0:
+            if time.time() - last_hb >= 10.0:
                 try:
                     sunshine_enabled, http_port, https_port, _, _ = detect_sunshine_config(ssh_user)
                     hb = api_request(
@@ -642,7 +802,7 @@ def cmd_daemon(args: argparse.Namespace) -> int:
                         payload={
                             "device_name": latest["device"]["device_name"],
                             "platform": "linux",
-                            "role": latest["device"].get("role", "host"),
+                            "role": "both" if sunshine_enabled else latest["device"].get("role", "host"),
                             "ssh_user": ssh_user,
                             "ssh_port": latest["device"].get("ssh_port", 22),
                             "sunshine_http_port": http_port,
@@ -658,6 +818,8 @@ def cmd_daemon(args: argparse.Namespace) -> int:
                     save_session(state_dir, hb)
                     if sunshine_enabled and hb.get("client_certs"):
                         sync_client_certs_to_sunshine(ssh_user, hb["client_certs"])
+                    if hb.get("pending_commands"):
+                        process_pending_commands(latest["server_url"], latest["token"], ssh_user, hb.get("client_certs") or [], hb["pending_commands"])
                     register_local_ssh_pubkey(latest["server_url"], latest["token"], hb["device"]["device_name"], ssh_user)
                     if hb.get("ssh_public_keys"):
                         sync_ssh_keys_to_authorized_keys(ssh_user, hb["ssh_public_keys"])

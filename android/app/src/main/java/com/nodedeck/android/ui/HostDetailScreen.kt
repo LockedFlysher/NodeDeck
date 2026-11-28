@@ -97,6 +97,7 @@ fun HostDetailScreen(
     val activeForwardIds by viewModel.activeForwardIds.collectAsState()
     val resolution by viewModel.streamResolution.collectAsState()
     val refreshRate by viewModel.streamRefreshRate.collectAsState()
+    val accountSession by viewModel.accountSession.collectAsState()
 
     val host = hosts.firstOrNull { it.id == hostId }
     if (host == null) {
@@ -114,6 +115,8 @@ fun HostDetailScreen(
     var showPairDialog by remember { mutableStateOf(false) }
     var showProfileDialog by remember { mutableStateOf(false) }
     var showAddForwardDialog by remember { mutableStateOf(false) }
+    var isAccountActivating by remember { mutableStateOf(false) }
+    var accountActivateError by remember { mutableStateOf<String?>(null) }
 
     Scaffold(
         topBar = {
@@ -196,11 +199,16 @@ fun HostDetailScreen(
                 0 -> OverviewTab(
                     snapshot = snapshot,
                     lang = lang,
-                    onRefresh = { viewModel.refreshHost(host.id) }
+                    onRefresh = { viewModel.refreshHost(host.id) },
+                    onOpenRemoteTab = { selectedTab = 1 }
                 )
                 1 -> RemoteAndNetworkTab(
                     host = host,
                     sunshine = sunshine,
+                    accountLoggedIn = accountSession.isLoggedIn,
+                    accountUsername = accountSession.username,
+                    isAccountActivating = isAccountActivating,
+                    accountActivateError = accountActivateError,
                     resolution = resolution,
                     refreshRate = refreshRate,
                     forwards = hostForwards,
@@ -209,6 +217,14 @@ fun HostDetailScreen(
                     onSelectResolution = { viewModel.setStreamResolution(it) },
                     onSelectRefreshRate = { viewModel.setStreamRefreshRate(it) },
                     onLaunchStream = { cfg -> onLaunchStream(host, cfg, resolution, refreshRate) },
+                    onQuickAccountActivate = {
+                        isAccountActivating = true
+                        accountActivateError = null
+                        viewModel.pairViaAccount(host) { res ->
+                            isAccountActivating = false
+                            res.onFailure { accountActivateError = it.message ?: "Account activation failed" }
+                        }
+                    },
                     onOpenPair = { showPairDialog = true },
                     onUnpair = { viewModel.removeSunshineConfig(host.alias) },
                     onOpenProfile = { showProfileDialog = true },
@@ -266,7 +282,8 @@ fun HostDetailScreen(
 private fun OverviewTab(
     snapshot: HostSnapshot,
     lang: AppLanguage,
-    onRefresh: () -> Unit
+    onRefresh: () -> Unit,
+    onOpenRemoteTab: () -> Unit
 ) {
     val metrics = snapshot.metrics
     LazyColumn(
@@ -286,17 +303,37 @@ private fun OverviewTab(
                     ) {
                         Text(
                             text = when (snapshot.state) {
-                                HostConnectionState.CHECKING -> AppLocalization.t("正在通过 SSH 采集节点状态…", "Probing node via SSH…", lang)
+                                HostConnectionState.CHECKING -> AppLocalization.t("正在探测节点状态…", "Probing node status…", lang)
+                                HostConnectionState.ONLINE -> AppLocalization.t("远程桌面已在线（未启用 SSH 指标）", "Remote Desktop Online (SSH metrics off)", lang)
                                 HostConnectionState.OFFLINE -> AppLocalization.t("节点当前离线或认证失败", "Node offline or auth failed", lang)
                                 else -> AppLocalization.t("尚未采集指标", "Metrics not fetched yet", lang)
                             },
                             style = MaterialTheme.typography.titleSmall
                         )
-                        snapshot.errorMessage?.let {
-                            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                        if (snapshot.state == HostConnectionState.ONLINE) {
+                            Text(
+                                text = AppLocalization.t(
+                                    "该设备已通过 NodeDeck 账号就绪，可直接切换到「远控与网络」连接桌面，无需安装或配置 SSH。",
+                                    "This host is ready for remote desktop via your NodeDeck account — no SSH required.",
+                                    lang
+                                ),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        } else {
+                            snapshot.errorMessage?.let {
+                                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                            }
                         }
-                        Button(onClick = onRefresh) {
-                            Text(AppLocalization.t("立即刷新", "Probe Now", lang))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            if (snapshot.state == HostConnectionState.ONLINE) {
+                                Button(onClick = onOpenRemoteTab) {
+                                    Text(AppLocalization.t("前往远控桌面", "Open Remote Tab", lang))
+                                }
+                            }
+                            OutlinedButton(onClick = onRefresh) {
+                                Text(AppLocalization.t("立即刷新", "Probe Now", lang))
+                            }
                         }
                     }
                 }
@@ -471,6 +508,10 @@ private fun GpuRow(gpu: GPUInfo) {
 private fun RemoteAndNetworkTab(
     host: SSHHost,
     sunshine: SunshineHostConfig?,
+    accountLoggedIn: Boolean,
+    accountUsername: String,
+    isAccountActivating: Boolean,
+    accountActivateError: String?,
     resolution: StreamResolutionPreset,
     refreshRate: StreamRefreshRate,
     forwards: List<SSHPortForwardConfig>,
@@ -479,6 +520,7 @@ private fun RemoteAndNetworkTab(
     onSelectResolution: (StreamResolutionPreset) -> Unit,
     onSelectRefreshRate: (StreamRefreshRate) -> Unit,
     onLaunchStream: (SunshineHostConfig) -> Unit,
+    onQuickAccountActivate: () -> Unit,
     onOpenPair: () -> Unit,
     onUnpair: () -> Unit,
     onOpenProfile: () -> Unit,
@@ -595,17 +637,93 @@ private fun RemoteAndNetworkTab(
                         }
                     }
                 } else {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Button(modifier = Modifier.weight(1f), onClick = onOpenPair) {
-                            Icon(Icons.Default.Link, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text(AppLocalization.t("配对远程桌面", "Pair Remote Host", lang))
+                    if (accountLoggedIn) {
+                        Button(
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = !isAccountActivating,
+                            onClick = onQuickAccountActivate
+                        ) {
+                            if (isAccountActivating) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    strokeWidth = 2.dp,
+                                    color = MaterialTheme.colorScheme.onPrimary
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text(AppLocalization.t("正在激活远控并同步证书…", "Activating host & syncing cert…", lang))
+                            } else {
+                                Icon(Icons.Default.Link, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text(
+                                    AppLocalization.t(
+                                        "账号一键激活远控（免 SSH / 免密码）",
+                                        "1-Tap Account Activate (No SSH / No Password)",
+                                        lang
+                                    ),
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
                         }
-                        OutlinedButton(onClick = onOpenProfile) {
-                            Text(AppLocalization.t("多用户配置", "Host Profile", lang))
+                        Text(
+                            text = AppLocalization.t(
+                                "使用当前账号（$accountUsername）直接下发手机证书并唤起电脑端被控服务。",
+                                "Uses signed-in account ($accountUsername) to sync this phone's cert and start remote host automatically.",
+                                lang
+                            ),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        accountActivateError?.let { err ->
+                            Text(
+                                text = err,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            OutlinedButton(
+                                modifier = Modifier.weight(1f),
+                                enabled = !isAccountActivating,
+                                onClick = onOpenPair
+                            ) {
+                                Text(
+                                    AppLocalization.t("更多配对方式", "More Options", lang),
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            OutlinedButton(
+                                modifier = Modifier.weight(1f),
+                                enabled = !isAccountActivating,
+                                onClick = onOpenProfile
+                            ) {
+                                Text(
+                                    AppLocalization.t("多用户配置", "Host Profile", lang),
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    } else {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Button(modifier = Modifier.weight(1f), onClick = onOpenPair) {
+                                Icon(Icons.Default.Link, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text(AppLocalization.t("配对远程桌面", "Pair Remote Host", lang))
+                            }
+                            OutlinedButton(onClick = onOpenProfile) {
+                                Text(AppLocalization.t("多用户配置", "Host Profile", lang))
+                            }
                         }
                     }
                 }

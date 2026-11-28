@@ -132,6 +132,20 @@ bundle_so "libva-drm.so.2" "$STAGE/opt/nodedeck/lib"
 install -m 0755 "$ROOT/linux/nodedeck_linux.py" "$STAGE/opt/nodedeck/nodedeck_linux.py"
 install -m 0755 "$ROOT/linux/nodedeck_mesh_agent.py" "$STAGE/opt/nodedeck/nodedeck_mesh_agent.py"
 install -m 0644 "$ROOT/linux/nodedeck-mesh.service" "$STAGE/usr/lib/systemd/system/nodedeck-mesh.service"
+cat > "$STAGE/usr/lib/systemd/user/nodedeck-mesh.service" <<'EOF'
+[Unit]
+Description=NodeDeck User-Space Built-in EasyTier Mesh Agent (Zero-Sudo)
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/nodedeck/nodedeck_mesh_agent.py --state-dir %h/.config/nodedeck daemon
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+EOF
 if [[ -x "/usr/local/bin/easytier-core" ]]; then
   install -m 0755 "/usr/local/bin/easytier-core" "$STAGE/opt/nodedeck/easytier/easytier-core"
 fi
@@ -285,8 +299,13 @@ EOF
 cat > "$STAGE/DEBIAN/postinst" <<'EOF'
 #!/usr/bin/env bash
 set -e
-if [ -x /opt/nodedeck/host/bin/nodedeck-host ] && command -v setcap >/dev/null 2>&1; then
-  setcap cap_sys_admin+p /opt/nodedeck/host/bin/nodedeck-host 2>/dev/null || true
+if command -v setcap >/dev/null 2>&1; then
+  if [ -x /opt/nodedeck/host/bin/nodedeck-host ]; then
+    setcap cap_sys_admin+p /opt/nodedeck/host/bin/nodedeck-host 2>/dev/null || true
+  fi
+  if [ -x /opt/nodedeck/easytier/easytier-core ]; then
+    setcap cap_net_admin,cap_net_raw+ep /opt/nodedeck/easytier/easytier-core 2>/dev/null || true
+  fi
 fi
 gtk-update-icon-cache -f /usr/share/icons/hicolor 2>/dev/null || true
 update-desktop-database /usr/share/applications 2>/dev/null || true

@@ -53,6 +53,32 @@ data class ControlPlaneMeshInfo(
 )
 
 @Serializable
+data class ControlPlaneActivateResponse(
+    val ok: Boolean = false,
+    @SerialName("command_id") val commandId: Int = 0,
+    val status: String = "pending",
+    @SerialName("target_device") val targetDevice: ControlPlaneDevice = ControlPlaneDevice()
+)
+
+@Serializable
+data class ControlPlaneCommandResult(
+    @SerialName("sunshine_enabled") val sunshineEnabled: Boolean? = null,
+    @SerialName("sunshine_http_port") val sunshineHttpPort: Int? = null,
+    @SerialName("sunshine_https_port") val sunshineHttpsPort: Int? = null,
+    val error: String? = null
+)
+
+@Serializable
+data class ControlPlaneCommandStatus(
+    val id: Int = 0,
+    @SerialName("target_device_id") val targetDeviceId: String = "",
+    val action: String = "",
+    val status: String = "pending",
+    val result: ControlPlaneCommandResult = ControlPlaneCommandResult(),
+    @SerialName("updated_at") val updatedAt: Long = 0L
+)
+
+@Serializable
 data class ControlPlaneStateResponse(
     val token: String? = null,
     val user: ControlPlaneUser = ControlPlaneUser(),
@@ -109,6 +135,14 @@ class ControlPlaneClient {
     private data class SshKeyRegisterBody(
         @SerialName("device_name") val deviceName: String,
         @SerialName("public_key") val publicKey: String
+    )
+
+    @Serializable
+    private data class ActivateDeviceBody(
+        @SerialName("target_device_id") val targetDeviceId: String = "",
+        @SerialName("target_ip") val targetIp: String = "",
+        @SerialName("target_name") val targetName: String = "",
+        val action: String = "activate_host"
     )
 
     @Serializable
@@ -231,6 +265,58 @@ class ControlPlaneClient {
         }
     }
 
+    suspend fun activateDevice(
+        serverUrl: String,
+        token: String,
+        targetDeviceId: String = "",
+        targetIp: String = "",
+        targetName: String = "",
+        action: String = "activate_host"
+    ): ControlPlaneActivateResponse = withContext(Dispatchers.IO) {
+        val body = json.encodeToString(
+            ActivateDeviceBody(
+                targetDeviceId = targetDeviceId.trim(),
+                targetIp = targetIp.trim(),
+                targetName = targetName.trim(),
+                action = action
+            )
+        )
+        val base = serverUrl.trimEnd('/')
+        val conn = (URL("$base/api/v1/devices/activate").openConnection() as HttpURLConnection).apply {
+            connectTimeout = 10_000
+            readTimeout = 10_000
+            requestMethod = "POST"
+            doOutput = true
+            setRequestProperty("Content-Type", "application/json; charset=utf-8")
+            setRequestProperty("Authorization", "Bearer $token")
+        }
+        try {
+            conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+            parseTypedResponse(conn)
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    suspend fun getCommandStatus(
+        serverUrl: String,
+        token: String,
+        commandId: Int
+    ): ControlPlaneCommandStatus = withContext(Dispatchers.IO) {
+        val base = serverUrl.trimEnd('/')
+        val conn = (URL("$base/api/v1/commands/$commandId").openConnection() as HttpURLConnection).apply {
+            connectTimeout = 8_000
+            readTimeout = 8_000
+            requestMethod = "GET"
+            setRequestProperty("Authorization", "Bearer $token")
+        }
+        try {
+            parseTypedResponse(conn)
+        } finally {
+            conn.disconnect()
+        }
+    }
+
     suspend fun logout(serverUrl: String, token: String) = withContext(Dispatchers.IO) {
         runCatching {
             val base = serverUrl.trimEnd('/')
@@ -271,7 +357,10 @@ class ControlPlaneClient {
         }
     }
 
-    private fun parseResponse(conn: HttpURLConnection): ControlPlaneStateResponse {
+    private fun parseResponse(conn: HttpURLConnection): ControlPlaneStateResponse =
+        parseTypedResponse(conn)
+
+    private inline fun <reified T> parseTypedResponse(conn: HttpURLConnection): T {
         val code = conn.responseCode
         val stream = if (code in 200..299) conn.inputStream else conn.errorStream
         val raw = stream?.bufferedReader(Charsets.UTF_8)?.readText().orEmpty()
@@ -283,6 +372,12 @@ class ControlPlaneClient {
         }
         return json.decodeFromString(raw)
     }
+
+    fun decodeActivateResponse(raw: String): ControlPlaneActivateResponse =
+        json.decodeFromString(raw)
+
+    fun decodeCommandStatus(raw: String): ControlPlaneCommandStatus =
+        json.decodeFromString(raw)
 
     companion object {
         const val DEFAULT_SERVER_URL = "https://lockedflysher.duckdns.org:8443/nodedeck-api"

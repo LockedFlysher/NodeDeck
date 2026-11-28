@@ -113,6 +113,21 @@ def init_db() -> None:
                     updated_at INTEGER NOT NULL,
                     UNIQUE(user_id, device_id)
                 );
+
+                CREATE TABLE IF NOT EXISTS device_commands (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    target_device_id TEXT NOT NULL,
+                    sender_device_id TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    payload_json TEXT NOT NULL DEFAULT '{}',
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    result_json TEXT NOT NULL DEFAULT '{}',
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_device_commands_target
+                    ON device_commands(user_id, target_device_id, status);
                 """
             )
             conn.commit()
@@ -288,6 +303,20 @@ def build_state_payload(
         "SELECT device_id, device_name, public_key, updated_at FROM ssh_keys WHERE user_id = ?",
         (user["id"],),
     ).fetchall()
+    # Expire stale pending commands older than 5 minutes
+    conn.execute(
+        "UPDATE device_commands SET status = 'expired', updated_at = ? WHERE user_id = ? AND status = 'pending' AND created_at < ?",
+        (now, user["id"], now - 300),
+    )
+    cmd_rows = conn.execute(
+        """
+        SELECT id, sender_device_id, action, payload_json, created_at
+        FROM device_commands
+        WHERE user_id = ? AND target_device_id = ? AND status = 'pending'
+        ORDER BY id ASC
+        """,
+        (user["id"], current_device["device_id"]),
+    ).fetchall()
 
     payload: dict[str, Any] = {
         "user": {
@@ -320,6 +349,16 @@ def build_state_payload(
                 "updated_at": int(k["updated_at"]),
             }
             for k in ssh_rows
+        ],
+        "pending_commands": [
+            {
+                "id": int(cmd["id"]),
+                "sender_device_id": cmd["sender_device_id"],
+                "action": cmd["action"],
+                "payload": json.loads(cmd["payload_json"] or "{}"),
+                "created_at": int(cmd["created_at"]),
+            }
+            for cmd in cmd_rows
         ],
     }
     if token is not None:
@@ -549,6 +588,12 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
                 finally:
                     conn.close()
 
+        if path.startswith("/api/v1/commands/"):
+            cmd_id_str = path.rsplit("/", 1)[-1]
+            if cmd_id_str.isdigit():
+                self._handle_get_command(int(cmd_id_str))
+                return
+
         self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
 
     def do_POST(self) -> None:
@@ -567,10 +612,18 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
             self._handle_logout()
         elif path == "/api/v1/devices/heartbeat":
             self._handle_heartbeat(body)
+        elif path == "/api/v1/devices/activate":
+            self._handle_activate_device(body)
         elif path == "/api/v1/certs/register":
             self._handle_cert_register(body)
         elif path == "/api/v1/ssh-keys/register":
             self._handle_ssh_key_register(body)
+        elif path.startswith("/api/v1/commands/") and path.endswith("/ack"):
+            parts = path.strip("/").split("/")
+            if len(parts) == 5 and parts[3].isdigit():
+                self._handle_ack_command(int(parts[3]), body)
+                return
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Invalid command id"})
         else:
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
 
@@ -756,6 +809,145 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
                 )
                 conn.commit()
                 self._send_json(HTTPStatus.OK, {"ok": True})
+            finally:
+                conn.close()
+
+    def _handle_activate_device(self, body: dict[str, Any]) -> None:
+        target_id = str(body.get("target_device_id") or "").strip()
+        target_ip = str(body.get("target_ip") or "").strip()
+        target_name = str(body.get("target_name") or "").strip()
+        action = str(body.get("action") or "activate_host").strip()
+        if action not in ("activate_host", "sync_certs"):
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Unsupported command action"})
+            return
+
+        with DB_LOCK:
+            conn = get_db()
+            try:
+                auth = self._authenticate(conn)
+                if auth is None:
+                    self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "Unauthorized"})
+                    return
+                user, sender_dev, _ = auth
+                target = None
+                if target_id:
+                    target = conn.execute(
+                        "SELECT * FROM devices WHERE user_id = ? AND device_id = ?",
+                        (user["id"], target_id),
+                    ).fetchone()
+                if target is None and target_ip:
+                    target = conn.execute(
+                        "SELECT * FROM devices WHERE user_id = ? AND virtual_ip = ?",
+                        (user["id"], target_ip),
+                    ).fetchone()
+                if target is None and target_name:
+                    target = conn.execute(
+                        "SELECT * FROM devices WHERE user_id = ? AND lower(device_name) = lower(?)",
+                        (user["id"], target_name),
+                    ).fetchone()
+                if target is None:
+                    self._send_json(HTTPStatus.NOT_FOUND, {"error": "Target device not found in this account"})
+                    return
+
+                now = int(time.time())
+                cur = conn.execute(
+                    """
+                    INSERT INTO device_commands (
+                        user_id, target_device_id, sender_device_id, action, payload_json, status, result_json, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, 'pending', '{}', ?, ?)
+                    """,
+                    (
+                        user["id"],
+                        target["device_id"],
+                        sender_dev["device_id"],
+                        action,
+                        json.dumps({"requested_by": sender_dev["device_name"]}),
+                        now,
+                        now,
+                    ),
+                )
+                conn.commit()
+                net = ipaddress.IPv4Network(user["mesh_subnet"], strict=False)
+                self._send_json(
+                    HTTPStatus.OK,
+                    {
+                        "ok": True,
+                        "command_id": int(cur.lastrowid),
+                        "status": "pending",
+                        "target_device": format_device(target, net.prefixlen, now),
+                    },
+                )
+            finally:
+                conn.close()
+
+    def _handle_get_command(self, cmd_id: int) -> None:
+        with DB_LOCK:
+            conn = get_db()
+            try:
+                auth = self._authenticate(conn)
+                if auth is None:
+                    self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "Unauthorized"})
+                    return
+                user, _, _ = auth
+                row = conn.execute(
+                    "SELECT * FROM device_commands WHERE id = ? AND user_id = ?",
+                    (cmd_id, user["id"]),
+                ).fetchone()
+                if row is None:
+                    self._send_json(HTTPStatus.NOT_FOUND, {"error": "Command not found"})
+                    return
+                self._send_json(
+                    HTTPStatus.OK,
+                    {
+                        "id": int(row["id"]),
+                        "target_device_id": row["target_device_id"],
+                        "action": row["action"],
+                        "status": row["status"],
+                        "result": json.loads(row["result_json"] or "{}"),
+                        "updated_at": int(row["updated_at"]),
+                    },
+                )
+            finally:
+                conn.close()
+
+    def _handle_ack_command(self, cmd_id: int, body: dict[str, Any]) -> None:
+        status = str(body.get("status") or "done").strip().lower()
+        if status not in ("done", "failed"):
+            status = "done"
+        result_obj = body.get("result")
+        if not isinstance(result_obj, dict):
+            result_obj = {}
+
+        with DB_LOCK:
+            conn = get_db()
+            try:
+                auth = self._authenticate(conn)
+                if auth is None:
+                    self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "Unauthorized"})
+                    return
+                user, dev, _ = auth
+                row = conn.execute(
+                    "SELECT * FROM device_commands WHERE id = ? AND user_id = ? AND target_device_id = ?",
+                    (cmd_id, user["id"], dev["device_id"]),
+                ).fetchone()
+                if row is None:
+                    self._send_json(HTTPStatus.NOT_FOUND, {"error": "Command not found for this device"})
+                    return
+                now = int(time.time())
+                conn.execute(
+                    "UPDATE device_commands SET status = ?, result_json = ?, updated_at = ? WHERE id = ?",
+                    (status, json.dumps(result_obj), now, cmd_id),
+                )
+                # If activation reported updated Sunshine status/ports, persist immediately on device record
+                if status == "done" and result_obj.get("sunshine_enabled") is True:
+                    hp = int(result_obj.get("sunshine_http_port") or dev["sunshine_http_port"] or 47989)
+                    hsp = int(result_obj.get("sunshine_https_port") or max(1, hp - 5))
+                    conn.execute(
+                        "UPDATE devices SET sunshine_enabled = 1, sunshine_http_port = ?, sunshine_https_port = ?, role = 'both', last_seen = ? WHERE id = ?",
+                        (hp, hsp, now, dev["id"]),
+                    )
+                conn.commit()
+                self._send_json(HTTPStatus.OK, {"ok": True, "id": cmd_id, "status": status})
             finally:
                 conn.close()
 

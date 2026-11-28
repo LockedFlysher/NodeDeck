@@ -2123,6 +2123,8 @@ class NodeDeckWindow(Gtk.Window):
         self.status_label.set_text(self.t(f"正在探测 {alias} 实时指标…", f"Probing live metrics for {alias}…"))
         host_obj = next((h for h in self.hosts if h.get("alias") == alias), {})
 
+        saved_sun = self.sunshine_hosts.get(alias)
+
         def worker():
             try:
                 data = collect_remote_metrics(
@@ -2133,6 +2135,27 @@ class NodeDeckWindow(Gtk.Window):
                 )
             except Exception as exc:
                 data = {"error": str(exc)}
+            # Mode A: if SSH is disabled/unconfigured on the target PC, still show Online when nodedeck-host is reachable
+            if "error" in data:
+                sun_addr = str((saved_sun or {}).get("address") or host_obj.get("hostname") or "")
+                sun_port = int((saved_sun or {}).get("httpPort") or 47989)
+                if sun_addr:
+                    sun_rtt = measure_tcp_rtt_ms(sun_addr, sun_port, timeout=2.0)
+                    if sun_rtt is not None:
+                        data = {
+                            "OS": "Remote Desktop Host (No SSH)",
+                            "KERNEL": "Account-Paired",
+                            "CORES": "--",
+                            "CPU": "0",
+                            "MEM_USED_MB": "0",
+                            "MEM_TOTAL_MB": "1",
+                            "DISK_USED_GB": "0",
+                            "DISK_TOTAL_GB": "1",
+                            "GPUS": [],
+                            "PROCS": [],
+                            "RTT_MS": sun_rtt,
+                            "SSH_OPTIONAL": True,
+                        }
             self.metrics_cache[alias] = data
             GLib.idle_add(self._on_metrics_ready, alias, data)
 
@@ -2580,7 +2603,11 @@ class NodeDeckWindow(Gtk.Window):
             btn_go.connect("clicked", lambda *_: self.launch_stream(saved))
             act_row.pack_start(btn_go, False, False, 0)
 
-        btn_pair = Gtk.Button(label=self.t("免 PIN 配对", "Zero-PIN Pair"))
+        btn_pair = Gtk.Button(
+            label=self.t("账号一键激活配对", "Activate via Account")
+            if load_account_session().get("token")
+            else self.t("免 PIN 配对", "Zero-PIN Pair")
+        )
         btn_pair.get_style_context().add_class("nd-btn-secondary" if saved else "nd-btn-primary")
         btn_pair.connect("clicked", lambda *_: self.on_pair_sunshine(h))
         act_row.pack_start(btn_pair, False, False, 0)
@@ -2898,19 +2925,29 @@ class NodeDeckWindow(Gtk.Window):
         self.render_detail()
 
     def on_pair_sunshine(self, host):
-        dlg = Gtk.Dialog(title=self.t(f'免 PIN 配对 ({host["alias"]})', f'Zero-PIN Pair ({host["alias"]})'), transient_for=self, flags=0)
+        acct = load_account_session()
+        if acct.get("token"):
+            # Mode A: Zero-SSH, Zero-Sudo account-authenticated activation & certificate pairing
+            self.status_label.set_text(
+                self.t(f"正在通过账号激活并配对 {host['alias']}（免 SSH / 免 sudo）…", f"Activating & pairing {host['alias']} via account…")
+            )
+            threading.Thread(target=self._account_activate_worker, args=(host,), daemon=True).start()
+            return
+
+        dlg = Gtk.Dialog(title=self.t(f'免 PIN SSH 配对 ({host["alias"]})', f'Zero-PIN SSH Pair ({host["alias"]})'), transient_for=self, flags=0)
         dlg.add_buttons(self.t("取消", "Cancel"), Gtk.ResponseType.CANCEL, self.t("开始配对", "Pair"), Gtk.ResponseType.OK)
         box = dlg.get_content_area()
+        box.set_margin_top(12)
+        box.set_margin_bottom(12)
+        box.set_margin_start(14)
+        box.set_margin_end(14)
         e_addr = Gtk.Entry(text=host["hostname"])
         e_port = Gtk.Entry(text="47989")
         e_user = Gtk.Entry(text=host["user"])
-        e_pass = Gtk.Entry(placeholder_text=self.t("可选 Sudo 密码（用户态留空）", "Optional Sudo Password (blank for user-space)"))
-        e_pass.set_visibility(False)
         for lbl_txt, widget in [
             (self.t("宿主机地址:", "Host Address:"), e_addr),
             (self.t("HTTP 端口:", "HTTP Port:"), e_port),
             (self.t("SSH 账号:", "SSH User:"), e_user),
-            (self.t("密码:", "Password:"), e_pass),
         ]:
             row = Gtk.Box(spacing=6)
             lbl = Gtk.Label(label=lbl_txt)
@@ -2924,25 +2961,80 @@ class NodeDeckWindow(Gtk.Window):
             addr = e_addr.get_text().strip()
             port = int(e_port.get_text().strip() or "47989")
             user = e_user.get_text().strip()
-            pwd = e_pass.get_text()
             self.status_label.set_text(self.t(f"正在配对 {addr}:{port}…", f"Pairing with {addr}:{port}..."))
-            threading.Thread(target=self._pair_worker, args=(host["alias"], addr, port, user, pwd), daemon=True).start()
+            threading.Thread(target=self._pair_worker, args=(host["alias"], addr, port, user), daemon=True).start()
         dlg.destroy()
 
-    def _pair_worker(self, alias, addr, port, user, pwd):
+    def _account_activate_worker(self, host: dict):
+        try:
+            acct = load_account_session()
+            token = str(acct.get("token") or "").strip()
+            server_url = str(acct.get("server_url") or DEFAULT_CONTROL_SERVER).rstrip("/")
+            if not token:
+                raise RuntimeError("Not signed in")
+            upload_linux_client_cert(acct)
+            payload = json.dumps({
+                "target_name": host["alias"],
+                "target_ip": host["hostname"],
+                "action": "activate_host",
+            }).encode("utf-8")
+            req = urllib.request.Request(
+                f"{server_url}/api/v1/devices/activate",
+                data=payload,
+                headers={"Content-Type": "application/json; charset=utf-8", "Authorization": f"Bearer {token}"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                act = json.loads(resp.read().decode("utf-8"))
+            cmd_id = act.get("command_id")
+            target_dev = act.get("target_device") or {}
+            http_port = int(target_dev.get("sunshine_http_port") or 47989)
+            https_port = int(target_dev.get("sunshine_https_port") or max(1, http_port - 5))
+            addr = str(target_dev.get("virtual_ip") or host["hostname"])
+
+            # Poll command completion up to 16s
+            for _ in range(16):
+                time.sleep(1.0)
+                st_req = urllib.request.Request(
+                    f"{server_url}/api/v1/commands/{cmd_id}",
+                    headers={"Authorization": f"Bearer {token}"},
+                    method="GET",
+                )
+                with urllib.request.urlopen(st_req, timeout=8) as r2:
+                    st = json.loads(r2.read().decode("utf-8"))
+                if st.get("status") == "done":
+                    res_obj = st.get("result") or {}
+                    http_port = int(res_obj.get("sunshine_http_port") or http_port)
+                    https_port = int(res_obj.get("sunshine_https_port") or max(1, http_port - 5))
+                    break
+                if st.get("status") == "failed":
+                    err = (st.get("result") or {}).get("error") or "Activation failed on target device"
+                    raise RuntimeError(err)
+
+            self.sunshine_hosts[host["alias"]] = {
+                "hostAlias": host["alias"],
+                "address": addr,
+                "httpPort": http_port,
+                "httpsPort": https_port,
+                "serverName": host["alias"],
+                "isPaired": True,
+            }
+            save_json(SUNSHINE_FILE, self.sunshine_hosts)
+            GLib.idle_add(
+                self.status_label.set_text,
+                self.t(f"账号激活配对完成：{host['alias']} ({addr}:{http_port})", f"Account activation & pairing ready: {host['alias']} ({addr}:{http_port})"),
+            )
+            GLib.idle_add(self.reload_hosts)
+        except Exception as exc:
+            GLib.idle_add(self.status_label.set_text, self.t(f"账号激活失败: {exc}", f"Account activation failed: {exc}"))
+
+    def _pair_worker(self, alias, addr, port, user):
         try:
             cert, key, uid = ensure_client_cert()
             cert_b64 = base64.b64encode(cert.read_bytes()).decode()
-            pwd_b64 = base64.b64encode(pwd.encode()).decode()
             remote_py = f"""
 import base64, json, os, re, subprocess, sys, uuid
-pwd = base64.b64decode("{pwd_b64}").decode("utf-8", errors="ignore")
 cert_pem = base64.b64decode("{cert_b64}").decode("utf-8")
-if pwd:
-    p = subprocess.run(["sudo", "-S", "-k", "-v"], input=(pwd + "\\n").encode(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if p.returncode != 0:
-        print("ERR:SUDO_AUTH_FAILED", file=sys.stderr)
-        sys.exit(11)
 nd_dir = os.path.expanduser("~/.config/nodedeck")
 sun_dir = os.path.expanduser("~/.config/sunshine")
 if os.path.exists(os.path.join(nd_dir, "host.conf")) or os.path.exists(os.path.join(nd_dir, "host_state.json")):
