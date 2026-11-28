@@ -147,8 +147,8 @@ class SshManager(private val store: SecureStore) {
                 val passBytes = host.privateKeyPassphrase.takeIf { it.isNotEmpty() }?.toByteArray(Charsets.UTF_8)
                 jsch.addIdentity(host.privateKeyName, pem.toByteArray(Charsets.UTF_8), null, passBytes)
                 loadedKey = true
-            } else if (host.password.isEmpty()) {
-                // OpenSSH-style fallback: try standard saved private keys automatically
+            } else {
+                // Always also try local account-synced SSH keys before/alongside password auth
                 for (defaultKey in listOf("id_ed25519", "id_rsa", "id_ecdsa")) {
                     val pem = store.readPrivateKey(defaultKey) ?: continue
                     runCatching {
@@ -159,7 +159,7 @@ class SshManager(private val store: SecureStore) {
             }
 
             val session = jsch.getSession(host.user.ifBlank { "root" }, targetHost, targetPort)
-            if (host.authType == SSHAuthType.PASSWORD && host.password.isNotEmpty()) {
+            if (host.password.isNotEmpty()) {
                 session.setPassword(host.password)
             }
 
@@ -167,7 +167,9 @@ class SshManager(private val store: SecureStore) {
                 put("StrictHostKeyChecking", "no")
                 put(
                     "PreferredAuthentications",
-                    if (loadedKey || host.authType == SSHAuthType.PRIVATE_KEY) {
+                    if (host.authType == SSHAuthType.PASSWORD && host.password.isNotEmpty()) {
+                        "publickey,password,keyboard-interactive"
+                    } else if (loadedKey || host.authType == SSHAuthType.PRIVATE_KEY) {
                         "publickey,password,keyboard-interactive"
                     } else {
                         "password,keyboard-interactive,publickey"

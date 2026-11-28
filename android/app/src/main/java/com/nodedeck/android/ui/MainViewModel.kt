@@ -297,11 +297,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun mergeAccountHostDevices(devices: List<ControlPlaneDevice>, selfDeviceId: String) {
         val desktopPlatforms = setOf("linux", "macos", "windows")
-        val hostDevices = devices.filter {
-            it.deviceId != selfDeviceId &&
-                (it.role == "host" || it.role == "both" || it.platform.lowercase() in desktopPlatforms) &&
-                it.virtualIp.isNotBlank()
-        }
+        // Sort so online devices are applied last and always overwrite stale offline duplicates with the same name
+        val hostDevices = devices
+            .filter {
+                it.deviceId != selfDeviceId &&
+                    (it.role == "host" || it.role == "both" || it.platform.lowercase() in desktopPlatforms) &&
+                    it.virtualIp.isNotBlank()
+            }
+            .sortedWith(compareBy<ControlPlaneDevice> { it.online }.thenBy { it.lastSeen })
         if (hostDevices.isEmpty()) return
 
         val nextHosts = _hosts.value.toMutableList()
@@ -547,7 +550,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 host = host,
                 state = HostConnectionState.ONLINE,
                 latencyMs = bestMs,
-                errorMessage = null,
+                errorMessage = err,
                 lastUpdatedMs = System.currentTimeMillis()
             )
         }

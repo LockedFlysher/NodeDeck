@@ -386,9 +386,12 @@ def reload_user_sunshine(target_user: str, start_if_stopped: bool = False) -> bo
 
     if start_if_stopped:
         # Try systemd --user nodedeck-host.service first
-        if _run_systemctl("start", "nodedeck-host.service").returncode == 0:
-            return True
-        # Fallback: start bundled nodedeck-host directly in user space
+        _run_systemctl("daemon-reload")
+        if _run_systemctl("enable", "--now", "nodedeck-host.service").returncode == 0:
+            time.sleep(1.5)
+            if _run_systemctl("is-active", "--quiet", "nodedeck-host.service").returncode == 0:
+                return True
+        # Fallback: start bundled nodedeck-host directly in user space with desktop DISPLAY
         host_bin = Path("/opt/nodedeck/host/bin/nodedeck-host")
         enabled, _, _, conf_dir, _ = ensure_default_sunshine_config(target_user)
         if enabled and conf_dir is not None and host_bin.is_file():
@@ -396,11 +399,14 @@ def reload_user_sunshine(target_user: str, start_if_stopped: bool = False) -> bo
             if conf_file.exists():
                 subprocess.run(["pkill", "-x", "nodedeck-host"], capture_output=True)
                 log_path = conf_dir / "nodedeck-host.log"
+                run_env = env.copy()
+                run_env.setdefault("DISPLAY", ":0")
                 try:
                     with open(log_path, "ab") as logf:
                         subprocess.Popen(
                             [str(host_bin), str(conf_file)],
                             cwd=str(conf_dir),
+                            env=run_env,
                             stdout=logf,
                             stderr=logf,
                             stdin=subprocess.DEVNULL,

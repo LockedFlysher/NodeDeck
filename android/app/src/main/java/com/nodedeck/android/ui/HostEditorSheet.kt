@@ -57,7 +57,7 @@ fun HostEditorDialog(
                 if (initialHost == null) {
                     AppLocalization.t("添加 SSH 节点", "Add SSH Host", lang)
                 } else {
-                    AppLocalization.t("编辑 SSH 节点", "Edit SSH Host", lang)
+                    AppLocalization.t("激活主机 SSH / 编辑节点", "Activate Host SSH / Edit", lang)
                 }
             )
         },
@@ -68,6 +68,15 @@ fun HostEditorDialog(
                     .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
+                Text(
+                    text = AppLocalization.t(
+                        "输入目标电脑的 SSH 登录密码（或配置私钥）保存后，将立即激活 CPU/GPU 性能面板、终端与文件浏览。若提示 22 端口拒绝连接，请先在目标电脑 NodeDeck 点击「激活主机 SSH」。",
+                        "Enter the target PC's SSH password (or private key) to unlock live CPU/GPU metrics, terminal, and SFTP. If port 22 is refused, click 'Activate Host SSH' on the target PC first.",
+                        lang
+                    ),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
                 OutlinedTextField(
                     value = alias,
                     onValueChange = { alias = it },

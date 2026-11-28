@@ -305,6 +305,14 @@ def resolve_host_bin() -> str:
     return ""
 
 
+def is_local_ssh_running() -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", 22), timeout=0.25):
+            return True
+    except Exception:
+        return False
+
+
 def is_local_host_running() -> bool:
     try:
         r = subprocess.run(
@@ -1396,6 +1404,31 @@ class NodeDeckWindow(Gtk.Window):
         host_bar.pack_end(self.sw_local_host, False, False, 0)
         sidebar.pack_start(host_bar, False, False, 0)
 
+        # 5b. Pinned Local SSH Activation Bar (explicit sudo activation for metrics/terminal/SFTP)
+        ssh_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        ssh_bar.get_style_context().add_class("nd-card-compact")
+        ssh_bar.set_margin_start(10)
+        ssh_bar.set_margin_end(10)
+        ssh_bar.set_margin_top(0)
+        ssh_bar.set_margin_bottom(8)
+
+        ssh_text_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        self.lbl_ssh_title = Gtk.Label()
+        self.lbl_ssh_title.set_xalign(0)
+        self.lbl_ssh_sub = Gtk.Label()
+        self.lbl_ssh_sub.get_style_context().add_class("nd-brand-sub")
+        self.lbl_ssh_sub.set_xalign(0)
+        ssh_text_box.pack_start(self.lbl_ssh_title, False, False, 0)
+        ssh_text_box.pack_start(self.lbl_ssh_sub, False, False, 0)
+        ssh_bar.pack_start(ssh_text_box, True, True, 0)
+
+        self.btn_activate_ssh = Gtk.Button()
+        self.btn_activate_ssh.set_valign(Gtk.Align.CENTER)
+        self.btn_activate_ssh.get_style_context().add_class("nd-icon-btn-accent")
+        self.btn_activate_ssh.connect("clicked", self.on_activate_local_ssh)
+        ssh_bar.pack_end(self.btn_activate_ssh, False, False, 0)
+        sidebar.pack_start(ssh_bar, False, False, 0)
+
         # 6. Sidebar Footer (Account Pill + How It Works + Lang Toggle)
         footer = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         footer.get_style_context().add_class("nd-footer-bar")
@@ -1487,6 +1520,20 @@ class NodeDeckWindow(Gtk.Window):
             self.lbl_host_title.set_markup(f'<span foreground="#8b9bb0">○</span> <b>{GLib.markup_escape_text(self.t("本机被控端", "Local Host"))}</b>')
             self.lbl_host_sub.set_text(self.t("已关闭 · 点击右侧开启", "Stopped · Toggle to enable"))
 
+        ssh_ok = is_local_ssh_running()
+        if ssh_ok:
+            self.lbl_ssh_title.set_markup(f'<span foreground="#46d687">●</span> <b>{GLib.markup_escape_text(self.t("本机 SSH", "Host SSH"))}</b>')
+            self.lbl_ssh_sub.set_text(self.t("端口 22 运行中（性能面板就绪）", "Port 22 active (metrics ready)"))
+            self.btn_activate_ssh.set_label(self.t("已激活", "Active"))
+            self.btn_activate_ssh.get_style_context().remove_class("nd-icon-btn-accent")
+            self.btn_activate_ssh.get_style_context().add_class("nd-icon-btn")
+        else:
+            self.lbl_ssh_title.set_markup(f'<span foreground="#f0a742">○</span> <b>{GLib.markup_escape_text(self.t("本机 SSH 未启用", "Host SSH Off"))}</b>')
+            self.lbl_ssh_sub.set_text(self.t("需激活以查看性能面板/终端", "Activate for metrics & terminal"))
+            self.btn_activate_ssh.set_label(self.t("激活主机 SSH", "Activate SSH"))
+            self.btn_activate_ssh.get_style_context().remove_class("nd-icon-btn")
+            self.btn_activate_ssh.get_style_context().add_class("nd-icon-btn-accent")
+
         acct = load_account_session()
         acct_user = acct.get("user", {}).get("username")
         acct_ip = acct.get("device", {}).get("virtual_ip")
@@ -1510,6 +1557,115 @@ class NodeDeckWindow(Gtk.Window):
             return False
         self.on_toggle_local_host(None, desired_state=bool(state))
         return False
+
+    def on_activate_local_ssh(self, _btn):
+        ssh_ok = is_local_ssh_running()
+        dlg = Gtk.Dialog(
+            title=self.t("激活主机 SSH 服务", "Activate Host SSH Service"),
+            transient_for=self,
+            flags=0,
+        )
+        dlg.set_default_size(440, 230)
+        box = dlg.get_content_area()
+        box.set_spacing(10)
+        box.set_margin_top(14)
+        box.set_margin_bottom(14)
+        box.set_margin_start(16)
+        box.set_margin_end(16)
+
+        msg = Gtk.Label(
+            label=self.t(
+                "查看 CPU/GPU 实时性能面板、交互式终端和 SFTP 文件浏览需要本机开启 openssh-server（22 端口）。\n\n"
+                "请输入当前 Linux 管理员（sudo）密码，NodeDeck 将自动：\n"
+                "1. 安装并启动 openssh-server（开机自启）\n"
+                "2. 如开启了 ufw 防火墙，自动放行 22 与 47984-48010 端口\n"
+                "3. 同步当前账号的 SSH 公钥，此后手机/Mac 免密直连\n\n"
+                "（密码仅用于本次提权，绝不落盘或上传）"
+                + ("\n\n当前检测：端口 22 已开启，可重新同步公钥与防火墙规则。" if ssh_ok else ""),
+                "Live CPU/GPU metrics, terminal, and SFTP require openssh-server on port 22.\n\n"
+                "Enter your Linux sudo password once to:\n"
+                "1. Install & start openssh-server (enabled on boot)\n"
+                "2. Allow ports 22 & 47984-48010 if UFW is active\n"
+                "3. Sync account SSH public keys into ~/.ssh/authorized_keys\n\n"
+                "(Password is never saved or transmitted.)",
+            )
+        )
+        msg.set_xalign(0)
+        msg.set_line_wrap(True)
+        box.pack_start(msg, False, False, 0)
+
+        ent_pwd = Gtk.Entry()
+        ent_pwd.set_visibility(False)
+        ent_pwd.set_placeholder_text(self.t("输入本机 sudo 管理员密码", "Enter local sudo password"))
+        ent_pwd.set_activates_default(True)
+        box.pack_start(ent_pwd, False, False, 0)
+
+        dlg.add_buttons(
+            self.t("取消", "Cancel"),
+            Gtk.ResponseType.CANCEL,
+            self.t("立即激活 SSH", "Activate SSH"),
+            Gtk.ResponseType.OK,
+        )
+        dlg.set_default_response(Gtk.ResponseType.OK)
+        dlg.show_all()
+        resp = dlg.run()
+        pwd = ent_pwd.get_text()
+        dlg.destroy()
+        if resp != Gtk.ResponseType.OK or not pwd:
+            return
+
+        self.status_label.set_text(self.t("正在激活本机 SSH 服务（安装/启动 openssh-server）…", "Activating local SSH service…"))
+
+        def worker():
+            script = (
+                "set -e; "
+                "if ! command -v sshd >/dev/null 2>&1; then "
+                "  if command -v apt-get >/dev/null 2>&1; then "
+                "    DEBIAN_FRONTEND=noninteractive apt-get update -qq && "
+                "    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-server; "
+                "  elif command -v dnf >/dev/null 2>&1; then "
+                "    dnf install -y -q openssh-server; "
+                "  elif command -v pacman >/dev/null 2>&1; then "
+                "    pacman -Sy --noconfirm openssh; "
+                "  fi; "
+                "fi; "
+                "(systemctl enable --now ssh || systemctl enable --now sshd || service ssh start); "
+                "if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi 'Status: active'; then "
+                "  ufw allow 22/tcp >/dev/null 2>&1 || true; "
+                "  ufw allow 47984:48010/tcp >/dev/null 2>&1 || true; "
+                "  ufw allow 47998:48010/udp >/dev/null 2>&1 || true; "
+                "fi"
+            )
+            try:
+                proc = subprocess.run(
+                    ["sudo", "-S", "-k", "bash", "-c", script],
+                    input=pwd + "\n",
+                    capture_output=True,
+                    text=True,
+                    timeout=180,
+                )
+                if proc.returncode != 0:
+                    err = (proc.stderr or proc.stdout).strip().splitlines()[-1:] or ["sudo failed"]
+                    GLib.idle_add(self.status_label.set_text, self.t(f"激活 SSH 失败: {err[0]}", f"SSH activation failed: {err[0]}"))
+                    return
+                acct = load_account_session()
+                if acct.get("token"):
+                    fresh = fetch_live_account_state(acct) or acct
+                    sync_account_ssh_keys(fresh)
+                GLib.idle_add(self._on_ssh_activated)
+            except Exception as exc:
+                GLib.idle_add(self.status_label.set_text, self.t(f"激活 SSH 异常: {exc}", f"SSH activation error: {exc}"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_ssh_activated(self):
+        self._update_chrome_labels()
+        self.status_label.set_text(
+            self.t(
+                "本机 SSH 已激活（端口 22 已监听 + 账号公钥已同步），手机/Mac 现在可直接查看性能面板！",
+                "Host SSH activated (port 22 active + account keys synced)!",
+            )
+        )
 
     def on_open_account_dialog(self, _btn):
         acct = load_account_session()

@@ -214,6 +214,8 @@ After=graphical-session.target pipewire-pulse.service
 
 [Service]
 Type=simple
+PassEnvironment=DISPLAY WAYLAND_DISPLAY XAUTHORITY XDG_RUNTIME_DIR PULSE_SERVER
+Environment=DISPLAY=:0
 ExecStartPre=/bin/sh -c 'mkdir -p "$HOME/.config/nodedeck"; if [ ! -f "$HOME/.config/nodedeck/apps.json" ]; then printf "{\n  \"env\": {},\n  \"apps\": [{ \"name\": \"Desktop\", \"image-path\": \"desktop.png\" }]\n}\n" > "$HOME/.config/nodedeck/apps.json"; fi; if [ ! -f "$HOME/.config/nodedeck/host.conf" ]; then printf "port = 47989\nfile_apps = %s/.config/nodedeck/apps.json\nfile_state = %s/.config/nodedeck/host_state.json\ncredentials_file = %s/.config/nodedeck/credentials.json\npkey = %s/.config/nodedeck/host.key\ncert = %s/.config/nodedeck/host.cert\n" "$HOME" "$HOME" "$HOME" "$HOME" "$HOME" > "$HOME/.config/nodedeck/host.conf"; fi'
 ExecStart=/opt/nodedeck/host/bin/nodedeck-host %h/.config/nodedeck/host.conf
 Restart=on-failure

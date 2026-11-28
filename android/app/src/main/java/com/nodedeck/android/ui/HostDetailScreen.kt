@@ -199,6 +199,7 @@ fun HostDetailScreen(
                     snapshot = snapshot,
                     lang = lang,
                     onRefresh = { viewModel.refreshHost(host.id) },
+                    onEditHost = { onEditHost(host) },
                     onOpenRemoteTab = { selectedTab = 1 }
                 )
                 1 -> RemoteAndNetworkTab(
@@ -282,6 +283,7 @@ private fun OverviewTab(
     snapshot: HostSnapshot,
     lang: AppLanguage,
     onRefresh: () -> Unit,
+    onEditHost: () -> Unit,
     onOpenRemoteTab: () -> Unit
 ) {
     val metrics = snapshot.metrics
@@ -291,6 +293,12 @@ private fun OverviewTab(
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         if (metrics == null) {
+            val rawErr = snapshot.errorMessage.orEmpty()
+            val isPortRefused = rawErr.contains("ECONNREFUSED", ignoreCase = true) ||
+                rawErr.contains("Connection refused", ignoreCase = true)
+            val isAuthFail = rawErr.contains("Auth fail", ignoreCase = true) ||
+                rawErr.contains("Auth cancel", ignoreCase = true) ||
+                rawErr.contains("USERAUTH", ignoreCase = true)
             item {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -301,37 +309,79 @@ private fun OverviewTab(
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         Text(
-                            text = when (snapshot.state) {
-                                HostConnectionState.CHECKING -> AppLocalization.t("正在探测节点状态…", "Probing node status…", lang)
-                                HostConnectionState.ONLINE -> AppLocalization.t("远程桌面已在线（未启用 SSH 指标）", "Remote Desktop Online (SSH metrics off)", lang)
-                                HostConnectionState.OFFLINE -> AppLocalization.t("节点当前离线或认证失败", "Node offline or auth failed", lang)
-                                else -> AppLocalization.t("尚未采集指标", "Metrics not fetched yet", lang)
+                            text = when {
+                                snapshot.state == HostConnectionState.CHECKING -> AppLocalization.t("正在探测节点与 SSH 状态…", "Probing node & SSH status…", lang)
+                                isPortRefused -> AppLocalization.t("目标电脑未激活主机 SSH（22 端口拒绝连接）", "Host SSH Not Activated (Port 22 Refused)", lang)
+                                isAuthFail -> AppLocalization.t("主机 SSH 需输入密码或同步密钥以激活性能面板", "Enter SSH Password to Activate Metrics", lang)
+                                snapshot.state == HostConnectionState.ONLINE -> AppLocalization.t("远程桌面在线 · 主机 SSH 尚未激活", "Remote Desktop Online · Host SSH Not Active", lang)
+                                snapshot.state == HostConnectionState.OFFLINE -> AppLocalization.t("节点离线或 SSH 未激活", "Node Offline or SSH Not Activated", lang)
+                                else -> AppLocalization.t("尚未激活主机 SSH 采集", "Host SSH Metrics Not Active Yet", lang)
                             },
-                            style = MaterialTheme.typography.titleSmall
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold
                         )
-                        if (snapshot.state == HostConnectionState.ONLINE) {
-                            Text(
-                                text = AppLocalization.t(
-                                    "该设备已通过 NodeDeck 账号就绪，可直接切换到「远控与网络」连接桌面，无需安装或配置 SSH。",
-                                    "This host is ready for remote desktop via your NodeDeck account — no SSH required.",
+                        Text(
+                            text = when {
+                                isPortRefused -> AppLocalization.t(
+                                    "组网链路已通，但目标电脑未运行 SSH 服务（openssh-server）。请在目标电脑打开 NodeDeck，点击左侧栏「激活主机 SSH」并输入电脑管理员密码，完成后即可查看 CPU/GPU 性能面板、终端和文件。",
+                                    "Mesh is reachable, but port 22 is closed on the target PC. Open NodeDeck on that PC and click 'Activate Host SSH' (enter PC password once to install & start openssh-server), then tap Refresh.",
                                     lang
-                                ),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                isAuthFail -> AppLocalization.t(
+                                    "目标主机已开启 SSH，但需要输入该电脑的登录密码（或导入私钥）才能读取 CPU/GPU 性能指标、打开终端与 SFTP 文件。",
+                                    "SSH is reachable on this host, but requires your login password (or SSH key) to unlock live CPU/GPU metrics, terminal, and SFTP.",
+                                    lang
+                                )
+                                snapshot.state == HostConnectionState.ONLINE -> AppLocalization.t(
+                                    "该设备远程桌面已就绪；如需查看 CPU/GPU 性能面板、终端和文件浏览，请点击下方「激活主机 SSH」填写登录密码。",
+                                    "Remote desktop is ready. To view live CPU/GPU metrics, terminal, and files, tap 'Activate Host SSH' below.",
+                                    lang
+                                )
+                                else -> AppLocalization.t(
+                                    "查看性能面板需要目标电脑在线并开启 SSH。如尚未填写登录密码，请点击下方「激活主机 SSH」输入密码。",
+                                    "Live metrics require the target PC to be online with SSH enabled. Tap 'Activate Host SSH' to enter your SSH password.",
+                                    lang
+                                )
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        if (rawErr.isNotBlank() && snapshot.state != HostConnectionState.CHECKING) {
+                            Text(
+                                text = rawErr,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.error
                             )
-                        } else {
-                            snapshot.errorMessage?.let {
-                                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-                            }
                         }
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            modifier = Modifier.fillMaxWidth(),
+                            onClick = onEditHost
+                        ) {
+                            Text(
+                                AppLocalization.t(
+                                    "激活主机 SSH（输入密码 / 配置私钥）",
+                                    "Activate Host SSH (Enter Password / Key)",
+                                    lang
+                                )
+                            )
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
                             if (snapshot.state == HostConnectionState.ONLINE) {
-                                Button(onClick = onOpenRemoteTab) {
-                                    Text(AppLocalization.t("前往远控桌面", "Open Remote Tab", lang))
+                                OutlinedButton(
+                                    modifier = Modifier.weight(1f),
+                                    onClick = onOpenRemoteTab
+                                ) {
+                                    Text(AppLocalization.t("前往远控桌面", "Open Remote", lang))
                                 }
                             }
-                            OutlinedButton(onClick = onRefresh) {
-                                Text(AppLocalization.t("立即刷新", "Probe Now", lang))
+                            OutlinedButton(
+                                modifier = Modifier.weight(1f),
+                                onClick = onRefresh
+                            ) {
+                                Text(AppLocalization.t("立即重试", "Retry Probe", lang))
                             }
                         }
                     }
