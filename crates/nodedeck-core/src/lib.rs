@@ -14,8 +14,9 @@ pub mod sunshine;
 
 pub use control_plane::{ControlPlaneClient, ControlPlaneError};
 pub use mesh::{
-    build_easytier_runtime_toml, discover_lan_ips, expand_seed_uris, fetch_live_peer_transports,
-    match_peer_transport, parse_easytier_transports, MeshPeerTransport, TransportKind,
+    build_easytier_runtime_toml, build_easytier_runtime_toml_with_mode, discover_lan_ips,
+    expand_seed_uris, fetch_live_peer_transports, load_routing_mode, match_peer_transport,
+    parse_easytier_transports, MeshPeerTransport, MeshRoutingMode, TransportKind,
 };
 pub use models::*;
 pub use ssh::{parse_remote_metrics, parse_ssh_config, upsert_ssh_host, RemoteMetrics, SshHost};

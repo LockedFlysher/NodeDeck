@@ -158,6 +158,7 @@ object MeshConfigCodec {
             appendLine("latency_first = true")
             appendLine("disable_tcp_hole_punching = true")
             appendLine("disable_sym_hole_punching = true")
+            appendLine("disable_upnp = true")
         }
     }
 

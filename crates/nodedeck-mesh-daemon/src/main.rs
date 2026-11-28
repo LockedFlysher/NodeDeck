@@ -8,9 +8,9 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use nodedeck_core::platform::{current_platform_name, default_platform_paths, resolve_first_executable};
 use nodedeck_core::{
-    build_easytier_runtime_toml, discover_lan_ips, fetch_live_peer_transports, parse_host_conf,
-    resolve_state_file_path, sync_client_certs_to_state, AccountSession, ControlPlaneClient,
-    ControlPlaneSshKey, DEFAULT_CONTROL_PLANE_URL,
+    build_easytier_runtime_toml_with_mode, discover_lan_ips, fetch_live_peer_transports,
+    load_routing_mode, parse_host_conf, resolve_state_file_path, sync_client_certs_to_state,
+    AccountSession, ControlPlaneClient, ControlPlaneSshKey, DEFAULT_CONTROL_PLANE_URL,
 };
 use serde_json::json;
 use std::collections::HashSet;
@@ -411,7 +411,13 @@ async fn main() -> Result<()> {
                 }
 
                 let active_key = sess.mesh_identity_key();
-                let toml = build_easytier_runtime_toml(&sess, &active_ips, platform_dev_name());
+                let active_mode = load_routing_mode(&state_dir);
+                let toml = build_easytier_runtime_toml_with_mode(
+                    &sess,
+                    &active_ips,
+                    platform_dev_name(),
+                    active_mode,
+                );
                 fs::create_dir_all(&state_dir)?;
                 fs::write(&toml_path, &toml)?;
                 #[cfg(unix)]
@@ -421,14 +427,18 @@ async fn main() -> Result<()> {
                 }
 
                 println!(
-                    "[nodedeck-mesh-daemon] starting easytier-core for {} ({}) seed={}",
-                    sess.device.device_name, sess.device.virtual_cidr, sess.mesh.seed_uri
+                    "[nodedeck-mesh-daemon] starting easytier-core for {} ({}) mode={} seed={}",
+                    sess.device.device_name,
+                    sess.device.virtual_cidr,
+                    active_mode.as_str(),
+                    sess.mesh.seed_uri
                 );
                 let mut child = Command::new(&et_bin)
                     .args(["-c", &toml_path.to_string_lossy()])
                     .spawn()
                     .context("failed to spawn easytier-core")?;
 
+                let mut hb_ticks: u32 = 0;
                 loop {
                     tokio::select! {
                         status = child.wait() => {
@@ -436,7 +446,22 @@ async fn main() -> Result<()> {
                             tokio::time::sleep(Duration::from_secs(2)).await;
                             break;
                         }
-                        _ = tokio::time::sleep(Duration::from_secs(10)) => {
+                        _ = tokio::time::sleep(Duration::from_secs(2)) => {
+                            hb_ticks += 1;
+                            // Instant (<2s) hot-reload when the user switches Latency vs Quality mode in the GUI.
+                            let now_mode = load_routing_mode(&state_dir);
+                            if now_mode != active_mode {
+                                println!(
+                                    "[nodedeck-mesh-daemon] routing mode changed ({} -> {}) -> reloading easytier-core",
+                                    active_mode.as_str(),
+                                    now_mode.as_str()
+                                );
+                                let _ = child.kill().await;
+                                break;
+                            }
+                            if hb_ticks % 5 != 0 {
+                                continue;
+                            }
                             let Some(disk_sess) = load_session(&state_dir) else {
                                 println!("[nodedeck-mesh-daemon] signed out, stopping easytier-core");
                                 let _ = child.kill().await;
@@ -500,10 +525,11 @@ async fn finish_auth(
     let pending = resp.pending_commands.clone();
     let sess = AccountSession::from_response(server, "", ssh_user, resp);
     save_session(state_dir, &sess)?;
-    let toml = build_easytier_runtime_toml(
+    let toml = build_easytier_runtime_toml_with_mode(
         &sess,
         &discover_lan_ips(&sess.device.virtual_cidr),
         platform_dev_name(),
+        load_routing_mode(state_dir),
     );
     fs::write(runtime_toml_file(state_dir), toml)?;
     handle_certs_keys_and_commands(cp, state_dir, &sess, &pending).await;

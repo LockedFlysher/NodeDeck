@@ -1,11 +1,61 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::fs;
 use std::net::UdpSocket;
 use std::path::Path;
 use std::process::Command;
 
 use crate::models::AccountSession;
+
+/// High-level user routing preference exposed as a simple 2-way toggle:
+/// - `Latency` ("延迟优先", default): disables UPnP & symmetric WAN hole-punching so multi-homed
+///   campus/carrier gateways cannot hijack traffic onto slow overseas detours, while preserving
+///   LAN P2P (2-15ms), normal PortRestricted P2P, and fast domestic UDP 25565 Relay (55-90ms).
+/// - `Quality` ("清晰度优先"): enables aggressive UPnP & WAN P2P hole-punching to bypass cloud
+///   relay bandwidth caps for high-bitrate video streaming.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum MeshRoutingMode {
+    #[default]
+    Latency,
+    Quality,
+}
+
+impl MeshRoutingMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            MeshRoutingMode::Latency => "latency",
+            MeshRoutingMode::Quality => "quality",
+        }
+    }
+
+    pub fn from_str_loose(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "quality" | "clarity" | "bandwidth" | "p2p" => MeshRoutingMode::Quality,
+            _ => MeshRoutingMode::Latency,
+        }
+    }
+}
+
+/// Reads the user's `MeshRoutingMode` from `<state_dir>/mesh_prefs.json` (or `settings.json`).
+/// Defaults to `MeshRoutingMode::Latency` when missing or unreadable.
+pub fn load_routing_mode(state_dir: &Path) -> MeshRoutingMode {
+    for (filename, key) in [
+        ("mesh_prefs.json", "routing_mode"),
+        ("settings.json", "mesh_routing_mode"),
+    ] {
+        let p = state_dir.join(filename);
+        if let Ok(raw) = fs::read_to_string(&p) {
+            if let Ok(v) = serde_json::from_str::<Value>(&raw) {
+                if let Some(mode_str) = v.get(key).and_then(Value::as_str) {
+                    return MeshRoutingMode::from_str_loose(mode_str);
+                }
+            }
+        }
+    }
+    MeshRoutingMode::Latency
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TransportKind {
@@ -178,14 +228,26 @@ fn is_usable_lan_ip(ip: &str, mesh_prefix3: &str) -> bool {
     true
 }
 
-/// Generates a uniform EasyTier runtime TOML across macOS, Linux, and Android.
-/// Uses pure UDP listeners and disables TCP hole-punching so slow proxy-routed TCP tunnels
-/// never override fast UDP P2P or UDP Relay paths; omits private-IP `mapped_listeners` so
-/// EasyTier's own local interface discovery and UPnP/IGD WAN port mapping work cleanly.
+/// Generates a uniform EasyTier runtime TOML across macOS, Linux, and Android
+/// using default `MeshRoutingMode::Latency`.
 pub fn build_easytier_runtime_toml(
+    session: &AccountSession,
+    lan_ips: &[String],
+    dev_name: Option<&str>,
+) -> String {
+    build_easytier_runtime_toml_with_mode(session, lan_ips, dev_name, MeshRoutingMode::Latency)
+}
+
+/// Generates a uniform EasyTier runtime TOML parameterized by `MeshRoutingMode`.
+/// Uses pure UDP listeners and disables TCP hole-punching in all modes.
+/// - `Latency` (default): sets `disable_upnp = true` and `disable_sym_hole_punching = true`
+///   to avoid multi-homed overseas WAN detours while keeping LAN P2P and fast domestic UDP Relay.
+/// - `Quality`: allows UPnP and aggressive UDP hole-punching to maximize direct bandwidth.
+pub fn build_easytier_runtime_toml_with_mode(
     session: &AccountSession,
     _lan_ips: &[String],
     dev_name: Option<&str>,
+    mode: MeshRoutingMode,
 ) -> String {
     let port = if session.mesh.listen_port >= 1024 {
         session.mesh.listen_port
@@ -196,6 +258,11 @@ pub fn build_easytier_runtime_toml(
         .into_iter()
         .map(|uri| format!("[[peer]]\nuri = \"{uri}\""))
         .collect();
+
+    let (disable_sym, disable_upnp) = match mode {
+        MeshRoutingMode::Latency => (true, true),
+        MeshRoutingMode::Quality => (false, false),
+    };
 
     let mut out = format!(
         "hostname = \"{}\"\n\
@@ -210,7 +277,8 @@ pub fn build_easytier_runtime_toml(
          multi_thread = true\n\
          latency_first = true\n\
          disable_tcp_hole_punching = true\n\
-         disable_sym_hole_punching = true\n",
+         disable_sym_hole_punching = {disable_sym}\n\
+         disable_upnp = {disable_upnp}\n",
         session.device.device_name,
         session.device.virtual_cidr,
         session.mesh.network_name,
@@ -517,8 +585,19 @@ mod tests {
         assert!(!toml.contains("mapped_listeners"));
         assert!(toml.contains("disable_tcp_hole_punching = true"));
         assert!(toml.contains("disable_sym_hole_punching = true"));
+        assert!(toml.contains("disable_upnp = true"));
         assert!(toml.contains("uri = \"udp://lockedflysher.duckdns.org:25565\""));
         assert!(!toml.contains("tcp://lockedflysher.duckdns.org"));
+
+        let q_toml = build_easytier_runtime_toml_with_mode(
+            &session,
+            &[],
+            Some("et-nodedeck"),
+            MeshRoutingMode::Quality,
+        );
+        assert!(q_toml.contains("disable_sym_hole_punching = false"));
+        assert!(q_toml.contains("disable_upnp = false"));
+        assert!(q_toml.contains("disable_tcp_hole_punching = true"));
     }
 
     #[test]

@@ -2963,21 +2963,9 @@ class NodeDeckWindow(Gtk.Window):
             badges_row.pack_start(_make_badge(self.t("● 在线", "● Online"), "nd-badge-online"), False, False, 0)
         mesh_info = match_easytier_transport(self.mesh_transports, h["hostname"], alias)
         if mesh_info:
-            if mesh_info["is_p2p"]:
-                m_cls = "nd-badge-lan" if "tcp" in mesh_info.get("proto", "") else "nd-badge-online"
-                m_lbl = _make_badge(mesh_info["detailed"], m_cls)
-                m_lbl.set_tooltip_text(self.t("EasyTier 点对点直连", "EasyTier P2P Direct"))
-            else:
-                m_cls = "nd-badge-offline" if mesh_info.get("is_tcp_relay") else "nd-badge-checking"
-                m_lbl = _make_badge(
-                    ("⚠ " if mesh_info.get("is_tcp_relay") else "") + mesh_info["detailed"],
-                    m_cls,
-                )
-                via_txt = f" (via {mesh_info['relay_via']})" if mesh_info.get("relay_via") else ""
-                m_lbl.set_tooltip_text(self.t(
-                    f"当前经由中继转发{via_txt}。若码率低或延迟高，请在云端防火墙放行 UDP 11010 或将 EasyTier 加入代理直连以恢复 P2P。",
-                    f"Relayed{via_txt}. Open UDP 11010 on seed server or bypass local proxy for EasyTier to restore P2P.",
-                ))
+            sig_text, sig_cls, sig_tip = self._format_signal_badge(mesh_info)
+            m_lbl = _make_badge(sig_text, sig_cls)
+            m_lbl.set_tooltip_text(sig_tip)
             badges_row.pack_start(m_lbl, False, False, 0)
         elif _is_lan_or_mesh_host(h["hostname"]):
             badges_row.pack_start(_make_badge("Mesh / LAN", "nd-badge-lan"), False, False, 0)
@@ -3268,6 +3256,64 @@ class NodeDeckWindow(Gtk.Window):
             info_card.pack_start(kv_row, False, False, 0)
         self.detail_box.pack_start(info_card, False, False, 0)
 
+    def _format_signal_badge(self, mesh_info: dict) -> tuple[str, str, str]:
+        lat = mesh_info.get("lat_ms")
+        loss = mesh_info.get("loss_pct") or 0.0
+        is_tcp = bool(mesh_info.get("is_tcp_relay"))
+        lat_txt = f" · {int(round(lat))}ms" if (lat is not None and lat > 0) else ""
+        via = mesh_info.get("relay_via") or ""
+        raw_detail = mesh_info.get("detailed") or mesh_info.get("badge") or "Mesh"
+        if via and not mesh_info.get("is_p2p"):
+            raw_detail = f"{raw_detail} · via {via}"
+        if is_tcp or loss >= 5.0 or (lat is not None and lat >= 180.0):
+            txt = self.t(f"⚠ 波动{lat_txt}", f"⚠ High Latency{lat_txt}")
+            cls = "nd-badge-offline"
+        elif lat is not None and lat >= 110.0:
+            txt = self.t(f"● 一般{lat_txt}", f"● Fair{lat_txt}")
+            cls = "nd-badge-checking"
+        elif lat is not None and lat < 35.0:
+            txt = self.t(f"● 极速{lat_txt}", f"● Fast{lat_txt}")
+            cls = "nd-badge-online"
+        else:
+            txt = self.t(f"● 流畅{lat_txt}", f"● Smooth{lat_txt}")
+            cls = "nd-badge-online"
+        tip = self.t(
+            f"链路详情：{raw_detail}\n可在「远程桌面 → 连接策略」切换延迟优先 / 清晰度优先。",
+            f"Link details: {raw_detail}\nSwitch Latency vs Quality priority in Remote Desktop -> Routing.",
+        )
+        return txt, cls, tip
+
+    def _get_mesh_routing_mode(self) -> str:
+        for p, k in [(CONF_DIR / "mesh_prefs.json", "routing_mode"), (SETTINGS_FILE, "mesh_routing_mode")]:
+            try:
+                if p.exists():
+                    d = json.loads(p.read_text(encoding="utf-8"))
+                    v = str(d.get(k) or "").strip().lower()
+                    if v in ("latency", "quality"):
+                        return v
+            except Exception:
+                pass
+        return "latency"
+
+    def _set_mesh_routing_mode(self, mode: str):
+        mode = "quality" if mode == "quality" else "latency"
+        try:
+            CONF_DIR.mkdir(parents=True, exist_ok=True)
+            (CONF_DIR / "mesh_prefs.json").write_text(
+                json.dumps({"routing_mode": mode}, indent=2), encoding="utf-8"
+            )
+            self.settings["mesh_routing_mode"] = mode
+            save_settings(self.settings)
+        except Exception:
+            pass
+        if mode == "latency":
+            self.status_label.set_text(self.t("已切换为 ⚡ 延迟优先，约 2 秒内自动平滑切换链路…", "Switched to ⚡ Latency First; hot-reloading link in ~2s…"))
+        else:
+            self.status_label.set_text(self.t("已切换为 🎬 清晰度优先（高带宽直连），约 2 秒内自动切换…", "Switched to 🎬 Quality First (high-bandwidth direct); reloading in ~2s…"))
+        self.render_detail()
+        GLib.timeout_add(3500, lambda: (self.refresh_mesh_transports_async(), False)[1])
+        GLib.timeout_add(7500, lambda: (self.refresh_mesh_transports_async(), False)[1])
+
     def _render_network_tab(self, h: dict, saved: dict | None, host_fwds: list):
         # 1. Remote Desktop Card with macOS-style Pill Selectors
         rd_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
@@ -3284,9 +3330,9 @@ class NodeDeckWindow(Gtk.Window):
             hdr_row.pack_end(_make_badge(self.t("尚未配对", "Not Paired"), "nd-badge-neutral"), False, False, 0)
         rd_card.pack_start(hdr_row, False, False, 0)
 
-        # Explicit Stream Network Path Banner (P2P UDP vs UDP Relay vs TCP Relay)
+        # Clean Signal Quality + 2-way Routing Preference (Latency First vs Quality First)
         route_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        r_title = Gtk.Label(label=self.t("串流网络方案", "Stream Path"))
+        r_title = Gtk.Label(label=self.t("连接质量", "Link Quality"))
         r_title.get_style_context().add_class("nd-dim")
         r_title.set_width_chars(10)
         r_title.set_xalign(0)
@@ -3295,39 +3341,61 @@ class NodeDeckWindow(Gtk.Window):
         target_addr = saved["address"] if saved else h["hostname"]
         rd_mesh = match_easytier_transport(self.mesh_transports, target_addr, h["alias"])
         if rd_mesh:
-            if rd_mesh["is_p2p"]:
-                r_cls = "nd-badge-lan" if "tcp" in rd_mesh.get("proto", "") else "nd-badge-online"
-                r_desc = self.t(
-                    f"点对点直连 ({rd_mesh['detailed']})",
-                    f"Direct P2P ({rd_mesh['detailed']})",
-                )
-            else:
-                r_cls = "nd-badge-offline" if rd_mesh.get("is_tcp_relay") else "nd-badge-checking"
-                via_str = f" · via {rd_mesh['relay_via']}" if rd_mesh.get("relay_via") else ""
-                r_desc = self.t(
-                    f"中继转发 ({rd_mesh['detailed']}{via_str})",
-                    f"Relayed ({rd_mesh['detailed']}{via_str})",
-                )
-            route_row.pack_start(_make_badge(rd_mesh["badge"], r_cls), False, False, 0)
-            r_detail = Gtk.Label(label=r_desc)
+            sig_text, sig_cls, sig_tip = self._format_signal_badge(rd_mesh)
+            sig_pill = _make_badge(sig_text, sig_cls)
+            sig_pill.set_tooltip_text(sig_tip)
+            route_row.pack_start(sig_pill, False, False, 0)
+            r_detail = Gtk.Label(label=rd_mesh["detailed"])
             r_detail.get_style_context().add_class("nd-dim")
             r_detail.get_style_context().add_class("nd-mono")
             r_detail.set_xalign(0)
             r_detail.set_ellipsize(3)
+            r_detail.set_tooltip_text(sig_tip)
             route_row.pack_start(r_detail, True, True, 0)
         else:
-            fallback_badge = "LAN Direct" if _is_lan_or_mesh_host(target_addr) else "WAN Direct"
+            fallback_badge = self.t("● 本地直连", "● Direct") if _is_lan_or_mesh_host(target_addr) else self.t("● 公网直连", "● WAN Direct")
             route_row.pack_start(_make_badge(fallback_badge, "nd-badge-lan"), False, False, 0)
-            r_detail = Gtk.Label(label=self.t("非 EasyTier 中继或正在探测链路…", "Non-mesh path or probing peers…"))
+            r_detail = Gtk.Label(label=self.t("正在自动测速…", "Probing link quality…"))
             r_detail.get_style_context().add_class("nd-dim")
             r_detail.set_xalign(0)
             route_row.pack_start(r_detail, True, True, 0)
         btn_refresh_route = Gtk.Button(label="↻")
         btn_refresh_route.get_style_context().add_class("nd-btn-ghost")
-        btn_refresh_route.set_tooltip_text(self.t("刷新实时 P2P / Relay 链路状态", "Refresh live P2P / Relay link status"))
+        btn_refresh_route.set_tooltip_text(self.t("刷新实时链路延迟", "Refresh live link latency"))
         btn_refresh_route.connect("clicked", lambda *_: self.refresh_mesh_transports_async())
         route_row.pack_end(btn_refresh_route, False, False, 0)
         rd_card.pack_start(route_row, False, False, 0)
+
+        # Simple 2-way mode picker: Latency First vs Quality First
+        mode_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        m_title = Gtk.Label(label=self.t("连接策略", "Priority"))
+        m_title.get_style_context().add_class("nd-dim")
+        m_title.set_width_chars(10)
+        m_title.set_xalign(0)
+        mode_row.pack_start(m_title, False, False, 0)
+        cur_mode = self._get_mesh_routing_mode()
+        for m_val, m_zh, m_en, m_tip_zh, m_tip_en in [
+            (
+                "latency",
+                "⚡ 延迟优先",
+                "⚡ Latency First",
+                "推荐：全节点自动避开慢速绕路，稳定低延迟不丢包（办公/操控首选）",
+                "Recommended: avoids slow WAN detours for consistent low latency",
+            ),
+            (
+                "quality",
+                "🎬 清晰度优先",
+                "🎬 Quality First",
+                "高带宽直连：允许主动打洞突破中继带宽上限，适合高码率画面",
+                "High-bandwidth direct P2P to bypass relay bandwidth caps",
+            ),
+        ]:
+            b = Gtk.Button(label=self.t(m_zh, m_en))
+            b.get_style_context().add_class("nd-pill-active" if cur_mode == m_val else "nd-pill")
+            b.set_tooltip_text(self.t(m_tip_zh, m_tip_en))
+            b.connect("clicked", lambda _w, v=m_val: self._set_mesh_routing_mode(v))
+            mode_row.pack_start(b, False, False, 0)
+        rd_card.pack_start(mode_row, False, False, 0)
 
         # Resolution pills
         res_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
