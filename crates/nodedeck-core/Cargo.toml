@@ -1,0 +1,14 @@
+[package]
+name = "nodedeck-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared cross-platform domain logic core for NodeDeck (Control Plane, EasyTier Mesh, Sunshine/Moonlight protocol, SSH orchestration, Stream telemetry)"
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+dirs.workspace = true

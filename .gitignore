@@ -9,3 +9,6 @@ android/.gradle/
 android/local.properties
 android/**/build/
 android/**/.cxx/
+
+# Rust workspace build artifacts
+/target/
