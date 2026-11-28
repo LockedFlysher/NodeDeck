@@ -707,7 +707,7 @@ def cmd_daemon(args: argparse.Namespace) -> int:
         ssh_user = sess.get("ssh_user") or sess.get("device", {}).get("ssh_user") or getpass.getuser()
         lan_ips = discover_lan_ips(sess.get("device", {}).get("virtual_cidr", ""))
         try:
-            sunshine_enabled, http_port, https_port, _, _ = detect_sunshine_config(ssh_user)
+            sunshine_enabled, http_port, https_port, _, _ = ensure_default_sunshine_config(ssh_user)
             hb = api_request(
                 sess["server_url"],
                 "POST",
@@ -715,7 +715,7 @@ def cmd_daemon(args: argparse.Namespace) -> int:
                 payload={
                     "device_name": sess["device"]["device_name"],
                     "platform": "linux",
-                    "role": sess["device"].get("role", "host"),
+                    "role": "both" if sunshine_enabled else sess["device"].get("role", "host"),
                     "ssh_user": ssh_user,
                     "ssh_port": sess["device"].get("ssh_port", 22),
                     "sunshine_http_port": http_port,
@@ -730,8 +730,10 @@ def cmd_daemon(args: argparse.Namespace) -> int:
             hb["ssh_user"] = ssh_user
             save_session(state_dir, hb)
             sess = hb
-            if sunshine_enabled and hb.get("client_certs"):
-                sync_client_certs_to_sunshine(ssh_user, hb["client_certs"])
+            if sunshine_enabled:
+                if hb.get("client_certs"):
+                    sync_client_certs_to_sunshine(ssh_user, hb["client_certs"])
+                reload_user_sunshine(ssh_user, start_if_stopped=True)
             if hb.get("pending_commands"):
                 process_pending_commands(sess["server_url"], sess["token"], ssh_user, hb.get("client_certs") or [], hb["pending_commands"])
             register_local_ssh_pubkey(sess["server_url"], sess["token"], hb["device"]["device_name"], ssh_user)

@@ -1645,6 +1645,21 @@ class NodeDeckWindow(Gtk.Window):
 
         def worker():
             try:
+                # Auto-heal upgraded sessions: ensure user-space mesh daemon is running (zero sudo)
+                if os.geteuid() != 0:
+                    if subprocess.run(["systemctl", "--user", "is-active", "--quiet", "nodedeck-mesh.service"], capture_output=True).returncode != 0:
+                        if subprocess.run(["systemctl", "--user", "enable", "--now", "nodedeck-mesh.service"], capture_output=True).returncode != 0:
+                            agent = Path("/opt/nodedeck/nodedeck_mesh_agent.py")
+                            if not agent.exists():
+                                agent = Path(__file__).resolve().parent / "nodedeck_mesh_agent.py"
+                            if subprocess.run(["pgrep", "-u", str(os.getuid()), "-f", "nodedeck_mesh_agent.py.*daemon"], capture_output=True).returncode != 0 and agent.exists():
+                                subprocess.Popen(
+                                    ["python3", str(agent), "--state-dir", str(Path.home() / ".config/nodedeck"), "daemon"],
+                                    stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL,
+                                    stdin=subprocess.DEVNULL,
+                                    start_new_session=True,
+                                )
                 fresh = fetch_live_account_state(acct) or acct
                 upload_linux_client_cert(fresh)
                 upload_linux_ssh_pubkey(fresh)
