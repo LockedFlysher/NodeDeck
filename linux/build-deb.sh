@@ -359,6 +359,39 @@ if command -v setcap >/dev/null 2>&1; then
 fi
 gtk-update-icon-cache -f /usr/share/icons/hicolor 2>/dev/null || true
 update-desktop-database /usr/share/applications 2>/dev/null || true
+
+# Auto-reload & restart active system or user-space services on GUI/dpkg upgrade
+# so users NEVER need to run terminal commands after installing a .deb update.
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl daemon-reload 2>/dev/null || true
+  SYS_MESH_ACTIVE=0
+  if systemctl is-active --quiet nodedeck-mesh.service 2>/dev/null; then
+    SYS_MESH_ACTIVE=1
+    systemctl restart nodedeck-mesh.service 2>/dev/null || true
+  fi
+  for uid_dir in /run/user/[0-9]*; do
+    [ -d "$uid_dir" ] || continue
+    uid="${uid_dir##*/}"
+    uname="$(getent passwd "$uid" | cut -d: -f1)"
+    uhome="$(getent passwd "$uid" | cut -d: -f6)"
+    [ -n "$uname" ] && [ -n "$uhome" ] || continue
+    bus="$uid_dir/bus"
+    [ -S "$bus" ] || continue
+    su -s /bin/bash "$uname" -c "
+      export XDG_RUNTIME_DIR='$uid_dir' DBUS_SESSION_BUS_ADDRESS='unix:path=$bus'
+      systemctl --user daemon-reload 2>/dev/null || true
+      if [ '$SYS_MESH_ACTIVE' = '0' ]; then
+        if [ -f '$uhome/.config/nodedeck/account.json' ]; then
+          systemctl --user enable --now nodedeck-mesh.service 2>/dev/null || true
+          systemctl --user restart nodedeck-mesh.service 2>/dev/null || true
+        else
+          systemctl --user try-restart nodedeck-mesh.service 2>/dev/null || true
+        fi
+      fi
+      systemctl --user try-restart nodedeck-host.service 2>/dev/null || true
+    " 2>/dev/null || true
+  done
+fi
 EOF
 chmod 0755 "$STAGE/DEBIAN/postinst"
 
