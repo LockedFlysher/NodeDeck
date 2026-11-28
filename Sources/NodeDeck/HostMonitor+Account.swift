@@ -5,7 +5,15 @@ extension HostMonitor {
     func loadAccountStateFromDisk() {
         accountSession = EmbeddedEasyTierManager.loadSession()
         if accountSession.isLoggedIn {
-            Task { await syncAccountState(silent: true) }
+            Task {
+                await syncAccountState(silent: true)
+                // One-time silent check: if still on legacy static easytier-core LaunchDaemon,
+                // prompt once to upgrade to self-healing pure-Rust nodedeck-mesh-daemon.
+                if !EmbeddedEasyTierManager.isAutoMeshDaemonInstalled(),
+                   EmbeddedEasyTierManager.resolveMeshDaemonBinary() != nil {
+                    try? await startBuiltInMacMesh()
+                }
+            }
             startAccountHeartbeatLoop()
         }
     }
@@ -89,6 +97,7 @@ extension HostMonitor {
             deviceName: deviceName
         )
         await applyAccountResponse(serverUrl: serverUrl, response: resp, fallbackToken: nil)
+        try? await startBuiltInMacMesh()
     }
 
     func loginAccount(serverUrl: String, username: String, password: String) async throws {
@@ -102,6 +111,7 @@ extension HostMonitor {
             deviceName: deviceName
         )
         await applyAccountResponse(serverUrl: serverUrl, response: resp, fallbackToken: nil)
+        try? await startBuiltInMacMesh()
     }
 
     func syncAccountState(silent: Bool = false) async {

@@ -79,7 +79,7 @@ fn runtime_toml_file(state_dir: &Path) -> PathBuf {
 fn load_session(state_dir: &Path) -> Option<AccountSession> {
     let path = session_file(state_dir);
     let raw = fs::read_to_string(&path).ok()?;
-    match serde_json::from_str::<AccountSession>(&raw) {
+    match AccountSession::parse_compat_json(&raw) {
         Ok(s) => Some(s),
         Err(err) => {
             eprintln!(
@@ -88,6 +88,17 @@ fn load_session(state_dir: &Path) -> Option<AccountSession> {
             );
             None
         }
+    }
+}
+
+fn platform_dev_name() -> Option<&'static str> {
+    #[cfg(target_os = "linux")]
+    {
+        Some("et-nodedeck")
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
     }
 }
 
@@ -400,7 +411,7 @@ async fn main() -> Result<()> {
                 }
 
                 let active_key = sess.mesh_identity_key();
-                let toml = build_easytier_runtime_toml(&sess, &active_ips, Some("et-nodedeck"));
+                let toml = build_easytier_runtime_toml(&sess, &active_ips, platform_dev_name());
                 fs::create_dir_all(&state_dir)?;
                 fs::write(&toml_path, &toml)?;
                 #[cfg(unix)]
@@ -492,7 +503,7 @@ async fn finish_auth(
     let toml = build_easytier_runtime_toml(
         &sess,
         &discover_lan_ips(&sess.device.virtual_cidr),
-        Some("et-nodedeck"),
+        platform_dev_name(),
     );
     fs::write(runtime_toml_file(state_dir), toml)?;
     handle_certs_keys_and_commands(cp, state_dir, &sess, &pending).await;

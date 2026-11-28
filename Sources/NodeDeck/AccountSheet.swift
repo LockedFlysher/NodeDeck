@@ -98,21 +98,33 @@ struct AccountSheet: View {
                         Button(l10n.t("同步", "Sync")) {
                             Task { await store.syncAccountState() }
                         }
-                        Button(l10n.t("启动/切换本机组网", "Apply Built-in Mesh")) {
-                            busy = true
-                            errorMessage = nil
-                            Task {
-                                do {
-                                    try await store.startBuiltInMacMesh()
-                                } catch {
-                                    errorMessage = error.localizedDescription
-                                }
-                                busy = false
+                        if EmbeddedEasyTierManager.isAutoMeshDaemonInstalled() {
+                            HStack(spacing: 5) {
+                                Circle().fill(Color.green).frame(width: 7, height: 7)
+                                Text(l10n.t("自动组网运行中", "Auto-Mesh Active"))
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.green)
                             }
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(Color.green.opacity(0.14), in: Capsule())
+                        } else {
+                            Button(l10n.t("启用后台自动组网", "Enable Auto-Mesh")) {
+                                busy = true
+                                errorMessage = nil
+                                Task {
+                                    do {
+                                        try await store.startBuiltInMacMesh()
+                                    } catch {
+                                        errorMessage = error.localizedDescription
+                                    }
+                                    busy = false
+                                }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(AppTheme.accent)
+                            .disabled(busy)
                         }
-                        .buttonStyle(.borderedProminent)
-                        .tint(AppTheme.accent)
-                        .disabled(busy)
                     }
 
                     if let errorMessage {

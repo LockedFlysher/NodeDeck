@@ -209,6 +209,65 @@ mod tests {
 }
 
 impl AccountSession {
+    /// Parses both canonical Linux/Rust `account.json` and legacy macOS Swift camelCase `account.json`.
+    pub fn parse_compat_json(raw: &str) -> Result<Self, serde_json::Error> {
+        if let Ok(sess) = serde_json::from_str::<AccountSession>(raw) {
+            return Ok(sess);
+        }
+        #[derive(Deserialize)]
+        struct MacSwiftAccountJson {
+            #[serde(rename = "serverUrl", default)]
+            server_url: String,
+            #[serde(default)]
+            username: String,
+            #[serde(default)]
+            token: String,
+            #[serde(rename = "deviceId", default)]
+            device_id: String,
+            #[serde(rename = "deviceName", default)]
+            device_name: String,
+            #[serde(rename = "virtualIp", default)]
+            virtual_ip: String,
+            #[serde(rename = "virtualCidr", default)]
+            virtual_cidr: String,
+            mesh: ControlPlaneMeshInfo,
+        }
+        let mac: MacSwiftAccountJson = serde_json::from_str(raw)?;
+        let cidr = if mac.virtual_cidr.is_empty() && !mac.virtual_ip.is_empty() {
+            format!("{}/24", mac.virtual_ip)
+        } else {
+            mac.virtual_cidr
+        };
+        Ok(AccountSession {
+            server_url: mac.server_url,
+            token: mac.token,
+            ssh_user: std::env::var("USER").unwrap_or_else(|_| "mac".to_string()),
+            user: ControlPlaneUser {
+                id: 0,
+                username: mac.username,
+            },
+            device: ControlPlaneDevice {
+                device_id: mac.device_id,
+                device_name: mac.device_name,
+                platform: crate::platform::current_platform_name().to_string(),
+                role: "both".to_string(),
+                virtual_ip: mac.virtual_ip,
+                virtual_cidr: cidr,
+                ssh_user: std::env::var("USER").unwrap_or_else(|_| "mac".to_string()),
+                ssh_port: 22,
+                sunshine_http_port: 47989,
+                sunshine_https_port: 47984,
+                sunshine_enabled: true,
+                online: true,
+                last_seen: 0,
+            },
+            mesh: mac.mesh,
+            devices: Vec::new(),
+            client_certs: Vec::new(),
+            ssh_public_keys: Vec::new(),
+        })
+    }
+
     pub fn from_response(
         server_url: &str,
         fallback_token: &str,

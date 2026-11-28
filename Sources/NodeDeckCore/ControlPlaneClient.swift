@@ -726,19 +726,64 @@ public enum EmbeddedEasyTierManager {
         return (uid, cert)
     }
 
-    /// Launches or restarts macOS built-in EasyTier via standard macOS Administrator prompt
-    /// (required once by macOS to open a utun interface and manage /Library/LaunchDaemons/io.nodedeck.mesh.plist).
+    public static func resolveMeshDaemonBinary() -> String? {
+        let candidates = [
+            Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/nodedeck-mesh-daemon").path,
+            "/Applications/NodeDeck.app/Contents/Helpers/nodedeck-mesh-daemon",
+            "/usr/local/bin/nodedeck-mesh-daemon"
+        ]
+        for p in candidates where FileManager.default.isExecutableFile(atPath: p) {
+            return p
+        }
+        return nil
+    }
+
+    /// Returns true once the self-healing pure-Rust `nodedeck-mesh-daemon` LaunchDaemon is installed
+    /// (which automatically tracks Control Plane seed_uri & LAN IP changes without further user clicks).
+    public static func isAutoMeshDaemonInstalled() -> Bool {
+        let plistPath = "/Library/LaunchDaemons/io.nodedeck.mesh.plist"
+        guard let txt = try? String(contentsOfFile: plistPath, encoding: .utf8) else {
+            return false
+        }
+        return txt.contains("nodedeck-mesh-daemon")
+    }
+
+    /// Installs or upgrades the macOS system LaunchDaemon (`io.nodedeck.mesh`) ONCE via macOS Admin prompt.
+    /// Uses the pure-Rust `nodedeck-mesh-daemon` so future seed_uri / Wi-Fi / account updates reload
+    /// `easytier-core` 100% automatically with zero user interaction.
     public static func installAndStartSystemMeshDaemon(tomlURL: URL) async throws {
+        let daemonBin = resolveMeshDaemonBinary()
         guard let etBin = resolveEasyTierBinary() else {
             throw ControlPlaneError.serverError("Built-in easytier-core binary not found")
         }
         let plistPath = "/Library/LaunchDaemons/io.nodedeck.mesh.plist"
         let confDst = "/etc/nodedeck/easytier-runtime.toml"
+        let acctSrc = appSupportDir.appendingPathComponent("account.json").path.replacingOccurrences(of: "'", with: "'\\''")
+        let acctDst = "/etc/nodedeck/account.json"
         let escapedSrc = tomlURL.path.replacingOccurrences(of: "'", with: "'\\''")
-        let escapedBin = etBin.replacingOccurrences(of: "'", with: "'\\''")
+
+        let programArgsXml: String
+        if let daemonBin {
+            let escapedDaemon = daemonBin.replacingOccurrences(of: "'", with: "'\\''")
+            programArgsXml = """
+            <string>\(escapedDaemon)</string>
+            <string>--state-dir</string>
+            <string>/etc/nodedeck</string>
+            <string>daemon</string>
+            """
+        } else {
+            let escapedBin = etBin.replacingOccurrences(of: "'", with: "'\\''")
+            programArgsXml = """
+            <string>\(escapedBin)</string>
+            <string>-c</string>
+            <string>\(confDst)</string>
+            """
+        }
+
         let shellCmd = """
         mkdir -p /etc/nodedeck && chmod 700 /etc/nodedeck && \
         cp '\(escapedSrc)' '\(confDst)' && chmod 600 '\(confDst)' && \
+        ([ -f '\(acctSrc)' ] && cp '\(acctSrc)' '\(acctDst)' && chmod 600 '\(acctDst)' || true) && \
         launchctl bootout system '\(plistPath)' 2>/dev/null || true; \
         cat > '\(plistPath)' <<'PLIST'
         <?xml version="1.0" encoding="UTF-8"?>
@@ -748,9 +793,7 @@ public enum EmbeddedEasyTierManager {
           <key>Label</key><string>io.nodedeck.mesh</string>
           <key>ProgramArguments</key>
           <array>
-            <string>\(escapedBin)</string>
-            <string>-c</string>
-            <string>\(confDst)</string>
+            \(programArgsXml)
           </array>
           <key>RunAtLoad</key><true/>
           <key>KeepAlive</key><true/>

@@ -87,7 +87,7 @@ if [[ -d "$HOST_APP" && -x "$HOST_APP/Contents/MacOS/nodedeck-host" ]]; then
     fi
 fi
 
-# Embed built-in EasyTier core & cli binaries if present
+# Embed built-in EasyTier core, cli, and pure-Rust auto-sync mesh daemon if present
 EASYTIER_BIN="${EASYTIER_BIN:-/usr/local/bin/easytier-core}"
 EASYTIER_CLI_BIN="${EASYTIER_CLI_BIN:-/usr/local/bin/easytier-cli}"
 if [[ -x "$EASYTIER_BIN" ]]; then
@@ -99,6 +99,13 @@ if [[ -x "$EASYTIER_CLI_BIN" ]]; then
     mkdir -p "$APP_PATH/Contents/Helpers"
     cp "$EASYTIER_CLI_BIN" "$APP_PATH/Contents/Helpers/easytier-cli"
     chmod 0755 "$APP_PATH/Contents/Helpers/easytier-cli"
+fi
+export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:$PATH"
+if [[ -f "$ROOT/Cargo.toml" ]] && command -v cargo >/dev/null 2>&1; then
+    (cd "$ROOT" && cargo build --release -p nodedeck-mesh-daemon)
+    mkdir -p "$APP_PATH/Contents/Helpers"
+    cp "$ROOT/target/release/nodedeck-mesh-daemon" "$APP_PATH/Contents/Helpers/nodedeck-mesh-daemon"
+    chmod 0755 "$APP_PATH/Contents/Helpers/nodedeck-mesh-daemon"
 fi
 
 codesign --force --deep --sign - "$APP_PATH"
