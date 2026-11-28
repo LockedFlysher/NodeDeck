@@ -254,6 +254,7 @@ enum class StreamResolutionPreset(val label: String, val width: Int, val height:
 }
 
 enum class StreamRefreshRate(val fps: Int) {
+    HZ_30(30),
     HZ_60(60),
     HZ_120(120),
     HZ_144(144),
@@ -276,8 +277,8 @@ object StreamQualityMath {
         val pixelRatio = (w.toDouble() * h.toDouble()) / (1920.0 * 1080.0)
         val fpsRatio = f.toDouble() / 60.0
         val raw = 20_000.0 * pixelRatio.pow(0.72) * fpsRatio.pow(0.75)
-        val rounded = (raw / 5_000.0).roundToInt() * 5_000
-        return rounded.coerceIn(20_000, 120_000)
+        val rounded = (raw / 2_000.0).roundToInt() * 2_000
+        return rounded.coerceIn(4_000, 120_000)
     }
 }
 

@@ -1499,16 +1499,35 @@ def _is_lan_or_mesh_host(hostname: str) -> bool:
     )
 
 
-def _recommended_bitrate_mbps(res: str, fps: str) -> int:
+def _compute_stream_bitrate_kbps(
+    res: str,
+    fps: str,
+    routing_mode: str = "latency",
+    is_relay: bool = False,
+) -> int:
     try:
         w_s, h_s = res.split("x")
+        fps_i = max(30, int(fps))
         pixel_ratio = (max(640, int(w_s)) * max(360, int(h_s))) / (1920.0 * 1080.0)
-        fps_ratio = max(30, int(fps)) / 60.0
+        fps_ratio = fps_i / 60.0
         raw = 20000.0 * (pixel_ratio ** 0.72) * (fps_ratio ** 0.75)
-        kbps = max(20000, min(120000, int(round(raw / 5000.0)) * 5000))
-        return kbps // 1000
+        kbps = max(4000, min(120000, int(round(raw / 2000.0)) * 2000))
+        if routing_mode == "latency" and is_relay:
+            # Avoid overflowing cloud UDP relay buffers while keeping crisp text
+            relay_cap = 4000 if fps_i <= 30 else (6000 if fps_i <= 60 else 8000)
+            kbps = min(kbps, relay_cap)
+        return kbps
     except Exception:
-        return 20
+        return 10000
+
+
+def _recommended_bitrate_mbps(
+    res: str,
+    fps: str,
+    routing_mode: str = "latency",
+    is_relay: bool = False,
+) -> int:
+    return _compute_stream_bitrate_kbps(res, fps, routing_mode=routing_mode, is_relay=is_relay) // 1000
 
 
 def _make_badge(text: str, style_class: str) -> Gtk.Label:
@@ -1565,14 +1584,15 @@ class NodeDeckWindow(Gtk.Window):
         self.metrics_cache = {}
         self.mesh_transports = []
         saved_res = self.settings.get("stream_resolution", "1920x1080")
-        if saved_res not in ("1920x1080", "2560x1440", "3840x2160"):
+        if saved_res not in ("1280x720", "1920x1080", "2560x1440", "3840x2160"):
             saved_res = "1920x1080"
         self.stream_resolution = saved_res
         saved_fps = str(self.settings.get("stream_fps", "60"))
-        if saved_fps not in ("60", "120", "144", "165"):
+        if saved_fps not in ("30", "60", "120", "144", "165"):
             saved_fps = "60"
         self.stream_fps = saved_fps
-        self.stream_hwaccel = "auto"
+        saved_hw = str(self.settings.get("stream_hwaccel", "auto"))
+        self.stream_hwaccel = saved_hw if saved_hw in ("auto", "vaapi", "cuda", "none") else "auto"
         self.active_tab_index = 0
 
         # Minimal dark macOS-like titlebar
@@ -3303,7 +3323,7 @@ class NodeDeckWindow(Gtk.Window):
                 json.dumps({"routing_mode": mode}, indent=2), encoding="utf-8"
             )
             self.settings["mesh_routing_mode"] = mode
-            save_settings(self.settings)
+            save_json(SETTINGS_FILE, self.settings)
         except Exception:
             pass
         if mode == "latency":
@@ -3391,7 +3411,9 @@ class NodeDeckWindow(Gtk.Window):
             ),
         ]:
             b = Gtk.Button(label=self.t(m_zh, m_en))
-            b.get_style_context().add_class("nd-pill-active" if cur_mode == m_val else "nd-pill")
+            b.get_style_context().add_class("nd-pill-choice")
+            if cur_mode == m_val:
+                b.get_style_context().add_class("nd-pill-selected")
             b.set_tooltip_text(self.t(m_tip_zh, m_tip_en))
             b.connect("clicked", lambda _w, v=m_val: self._set_mesh_routing_mode(v))
             mode_row.pack_start(b, False, False, 0)
@@ -3404,7 +3426,7 @@ class NodeDeckWindow(Gtk.Window):
         rl.set_width_chars(10)
         rl.set_xalign(0)
         res_row.pack_start(rl, False, False, 0)
-        for val, lbl in [("1920x1080", "1080p"), ("2560x1440", "1440p"), ("3840x2160", "4K")]:
+        for val, lbl in [("1280x720", "720p"), ("1920x1080", "1080p"), ("2560x1440", "1440p"), ("3840x2160", "4K")]:
             b = Gtk.Button(label=lbl)
             b.get_style_context().add_class("nd-pill-choice")
             if self.stream_resolution == val:
@@ -3420,14 +3442,20 @@ class NodeDeckWindow(Gtk.Window):
         fl.set_width_chars(10)
         fl.set_xalign(0)
         fps_row.pack_start(fl, False, False, 0)
-        for fps_val in ["60", "120", "144", "165"]:
+        for fps_val in ["30", "60", "120", "144", "165"]:
             b = Gtk.Button(label=f"{fps_val}Hz")
             b.get_style_context().add_class("nd-pill-choice")
             if self.stream_fps == fps_val:
                 b.get_style_context().add_class("nd-pill-selected")
             b.connect("clicked", lambda *_, v=fps_val: self._set_stream_fps(v))
             fps_row.pack_start(b, False, False, 0)
-        auto_mbps = _recommended_bitrate_mbps(self.stream_resolution, self.stream_fps)
+        is_relayed_now = bool(rd_mesh and not rd_mesh.get("is_p2p"))
+        auto_mbps = _recommended_bitrate_mbps(
+            self.stream_resolution,
+            self.stream_fps,
+            routing_mode=cur_mode,
+            is_relay=is_relayed_now,
+        )
         lbl_mbps = _make_badge(self.t(f"自动码率 {auto_mbps} Mbps", f"Auto {auto_mbps} Mbps"), "nd-badge-remote")
         fps_row.pack_end(lbl_mbps, False, False, 0)
         rd_card.pack_start(fps_row, False, False, 0)
@@ -3593,6 +3621,8 @@ class NodeDeckWindow(Gtk.Window):
 
     def _set_stream_hw(self, val: str):
         self.stream_hwaccel = val
+        self.settings["stream_hwaccel"] = val
+        save_json(SETTINGS_FILE, self.settings)
         self.render_detail()
 
     def on_add_device(self, _btn):
@@ -3962,10 +3992,18 @@ print(f"OK:{{detected_port}}")
             w_str, h_str = self.stream_resolution.split("x")
             fps_str = self.stream_fps
             mode_str = f"{w_str}x{h_str}x{fps_str}"
-            pixel_ratio = (max(640, int(w_str)) * max(360, int(h_str))) / (1920.0 * 1080.0)
-            fps_ratio = max(30, int(fps_str)) / 60.0
-            raw_bitrate = 20000.0 * (pixel_ratio ** 0.72) * (fps_ratio ** 0.75)
-            bitrate_kbps = max(20000, min(120000, int(round(raw_bitrate / 5000.0)) * 5000))
+            live_peers = fetch_easytier_peer_transports()
+            host_alias = str(saved.get("hostAlias") or saved.get("serverName") or "")
+            matched_route = match_easytier_transport(live_peers or self.mesh_transports, addr, host_alias)
+            route_badge = matched_route["badge"] if matched_route else ("LAN Direct" if _is_lan_or_mesh_host(addr) else "WAN Direct")
+            is_relay_link = bool(matched_route and not matched_route.get("is_p2p"))
+            routing_mode = self._get_mesh_routing_mode()
+            bitrate_kbps = _compute_stream_bitrate_kbps(
+                self.stream_resolution,
+                fps_str,
+                routing_mode=routing_mode,
+                is_relay=is_relay_link,
+            )
 
             opener = urllib.request.build_opener(
                 urllib.request.ProxyHandler({}),
@@ -4002,26 +4040,37 @@ print(f"OK:{{detected_port}}")
                 root = ET.fromstring(raw)
                 return root.attrib.get("status_code", "200"), root.attrib.get("status_message", ""), (root.findtext("sessionUrl0") or "").strip()
 
-            primary_ep = "resume" if (current_game != "0" or "BUSY" in server_state) else "launch"
-            sc, sm, rtsp = call_session(primary_ep)
-            if sc != "200" or not rtsp:
-                # If resume failed or another stale session blocked launch, try cancel + launch once
+            # Always cancel any existing stale session before /launch so Sunshine applies
+            # the newly requested width, height, refresh rate, and bitrate immediately
+            # (Sunshine's /resume ignores updated mode=WxHxFPS parameters).
+            if current_game != "0" or "BUSY" in server_state:
                 try:
                     opener.open(f"https://{addr}:{https_port}/cancel?uniqueid={uid}", timeout=6).read()
+                    time.sleep(0.35)
                 except Exception:
                     pass
-                sc, sm, rtsp = call_session("launch")
+            sc, sm, rtsp = call_session("launch")
+            if sc != "200" or not rtsp:
+                sc, sm, rtsp = call_session("resume")
             if sc != "200" or not rtsp:
                 raise RuntimeError(f"Sunshine HTTP {sc}: {sm or 'Failed to start streaming session'}")
 
             stream_bin = resolve_stream_bin()
-            live_peers = fetch_easytier_peer_transports()
-            host_alias = str(saved.get("hostAlias") or saved.get("serverName") or "")
-            matched_route = match_easytier_transport(live_peers or self.mesh_transports, addr, host_alias)
-            route_badge = matched_route["badge"] if matched_route else ("LAN Direct" if _is_lan_or_mesh_host(addr) else "WAN Direct")
             CONF_DIR.mkdir(parents=True, exist_ok=True)
             log_path = CONF_DIR / "stream-last.log"
             log_fh = open(log_path, "w", encoding="utf-8")
+            log_fh.write(
+                f"[nodedeck-linux] launching {w_str}x{h_str}@{fps_str}Hz "
+                f"bitrate={bitrate_kbps}kbps mode={routing_mode} route={route_badge}\n"
+            )
+            log_fh.flush()
+            GLib.idle_add(
+                self.status_label.set_text,
+                self.t(
+                    f"正在连接 {host_alias or addr} ({w_str}x{h_str} · {fps_str}Hz · {bitrate_kbps // 1000} Mbps)…",
+                    f"Streaming {host_alias or addr} ({w_str}x{h_str} · {fps_str}Hz · {bitrate_kbps // 1000} Mbps)…",
+                ),
+            )
             proc = subprocess.Popen(
                 [
                     stream_bin, "--host", addr, "--alias", host_alias or addr,

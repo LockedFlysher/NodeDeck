@@ -40,6 +40,7 @@ public enum StreamResolutionPreset: String, CaseIterable, Identifiable, Codable,
 }
 
 public enum StreamRefreshRate: Int, CaseIterable, Identifiable, Codable, Sendable {
+    case hz30 = 30
     case hz60 = 60
     case hz120 = 120
     case hz144 = 144
@@ -53,7 +54,7 @@ public enum StreamRefreshRate: Int, CaseIterable, Identifiable, Codable, Sendabl
 
 public enum StreamQualityMath {
     /// Computes a recommended Moonlight/Sunshine video bitrate (in kbps) scaled smoothly
-    /// by resolution pixel count and refresh rate, rounded to 5 Mbps increments.
+    /// by resolution pixel count and refresh rate, rounded to 2 Mbps increments (4..120 Mbps).
     public static func recommendedBitrateKbps(width: Int, height: Int, fps: Int) -> Int {
         let clampedW = max(640, width)
         let clampedH = max(360, height)
@@ -61,7 +62,7 @@ public enum StreamQualityMath {
         let pixelRatio = Double(clampedW * clampedH) / Double(1920 * 1080)
         let fpsRatio = Double(clampedFPS) / 60.0
         let raw = 20_000.0 * pow(pixelRatio, 0.72) * pow(fpsRatio, 0.75)
-        let rounded = Int((raw / 5_000.0).rounded()) * 5_000
-        return min(max(rounded, 20_000), 120_000)
+        let rounded = Int((raw / 2_000.0).rounded()) * 2_000
+        return min(max(rounded, 4_000), 120_000)
     }
 }
