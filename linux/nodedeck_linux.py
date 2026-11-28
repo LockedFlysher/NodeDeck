@@ -577,7 +577,7 @@ def fetch_easytier_peer_transports() -> list[dict]:
             "ipv4": ip,
             "hostname": hostname,
             "is_p2p": is_p2p,
-            "is_tcp_relay": (not is_p2p) and ("tcp" in proto),
+            "is_tcp_relay": (not is_p2p) and ("tcp" in proto) and ("udp" not in proto),
             "proto": proto,
             "relay_via": relay_via,
             "lat_ms": lat_ms,

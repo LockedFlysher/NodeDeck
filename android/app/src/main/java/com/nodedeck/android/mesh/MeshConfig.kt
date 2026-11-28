@@ -40,7 +40,10 @@ data class MeshPeerStatus(
     val proto: String
 ) {
     val isTcpRelay: Boolean
-        get() = !isDirect && proto.lowercase().contains("tcp")
+        get() {
+            val p = proto.lowercase()
+            return !isDirect && p.contains("tcp") && !p.contains("udp")
+        }
 
     fun transportBadge(): String {
         val p = proto.lowercase()

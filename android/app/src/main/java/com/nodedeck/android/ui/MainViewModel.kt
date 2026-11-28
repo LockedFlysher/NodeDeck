@@ -254,6 +254,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         store.saveAccountSession(session)
 
         // Persist built-in EasyTier mesh config automatically (invisible to the user)
+        val prevMesh = store.loadMeshConfig()
         val meshCfg = MeshConfig(
             hostname = resp.device.deviceName.ifBlank { "android" },
             ipv4 = session.virtualCidr,
@@ -263,6 +264,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             port = resp.mesh.listenPort
         )
         store.saveMeshConfig(meshCfg)
+        val meshChanged = prevMesh.seedUri != meshCfg.seedUri ||
+            prevMesh.networkName != meshCfg.networkName ||
+            prevMesh.networkSecret != meshCfg.networkSecret ||
+            prevMesh.ipv4 != meshCfg.ipv4
+        val curState = meshSnapshot.value.state
+        if (meshChanged && (curState == MeshConnectionState.CONNECTED || curState == MeshConnectionState.CONNECTING)) {
+            if (MeshRuntimeController.prepareVpnIntent(getApplication()) == null) {
+                MeshRuntimeController.start(getApplication())
+            }
+        }
 
         // Upload this phone's public Moonlight client cert AND local SSH public key so all user's hosts auto-trust it
         if (token.isNotBlank()) {

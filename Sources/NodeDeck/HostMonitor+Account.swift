@@ -221,23 +221,60 @@ extension HostMonitor {
             }
         }
 
-        // Auto-sync remote host devices' Sunshine configs so newly discovered hosts are immediately streamable
-        for dev in response.devices where dev.deviceId != session.deviceId && (dev.role == "host" || dev.role == "both") && dev.sunshineEnabled && !dev.virtualIp.isEmpty {
-            let exists = sunshineHostConfigs.contains {
-                $0.hostAlias.caseInsensitiveCompare(dev.deviceName) == .orderedSame || $0.address == dev.virtualIp
+        // Auto-discover & upsert remote account host devices into ~/.ssh/config AND sunshine-hosts.json
+        // so newly joined devices (e.g. mechrevo) appear immediately in Mac's sidebar and are stream-ready.
+        var sshConfigChanged = false
+        var sunshineChanged = false
+        let existingHosts: [SSHHost] = (try? SSHConfigParser.discover(configURL: configURL)) ?? []
+        let defaultIdFile = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".ssh/id_ed25519").path
+        let hasDefaultId = FileManager.default.fileExists(atPath: defaultIdFile)
+
+        for dev in response.devices where dev.deviceId != session.deviceId && (dev.role == "host" || dev.role == "both") && !dev.virtualIp.isEmpty {
+            let alias = dev.deviceName.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !alias.isEmpty else { continue }
+
+            let sshExists = existingHosts.contains { h in
+                let aliasHit = h.allAliases.contains { $0.caseInsensitiveCompare(alias) == .orderedSame }
+                let ipHit = h.hostName.caseInsensitiveCompare(dev.virtualIp) == .orderedSame
+                return aliasHit || ipHit
             }
-            if !exists {
-                let cfg = SunshineHostConfig(
-                    hostAlias: dev.deviceName,
-                    address: dev.virtualIp,
-                    httpPort: dev.sunshineHttpPort,
-                    httpsPort: dev.sunshineHttpsPort,
-                    serverName: dev.deviceName,
-                    isPaired: true
+            if !sshExists {
+                let draft = SSHHostDraft(
+                    alias: alias,
+                    hostName: dev.virtualIp,
+                    user: dev.sshUser.isEmpty ? NSUserName() : dev.sshUser,
+                    port: String(dev.sshPort > 0 ? dev.sshPort : 22),
+                    identityFile: hasDefaultId ? "~/.ssh/id_ed25519" : ""
                 )
-                sunshineHostConfigs.append(cfg)
-                try? SunshineClient.saveHosts(sunshineHostConfigs)
+                if (try? SSHConfigEditor.upsertHost(draft, configURL: configURL)) != nil {
+                    sshConfigChanged = true
+                }
             }
+
+            if dev.sunshineEnabled {
+                let sunExists = sunshineHostConfigs.contains {
+                    $0.hostAlias.caseInsensitiveCompare(alias) == .orderedSame || $0.address == dev.virtualIp
+                }
+                if !sunExists {
+                    let cfg = SunshineHostConfig(
+                        hostAlias: alias,
+                        address: dev.virtualIp,
+                        httpPort: dev.sunshineHttpPort,
+                        httpsPort: dev.sunshineHttpsPort,
+                        serverName: alias,
+                        isPaired: true
+                    )
+                    sunshineHostConfigs.append(cfg)
+                    sunshineChanged = true
+                }
+            }
+        }
+        if sunshineChanged {
+            try? SunshineClient.saveHosts(sunshineHostConfigs)
+        }
+        if sshConfigChanged {
+            reloadConfiguration()
         }
     }
 }

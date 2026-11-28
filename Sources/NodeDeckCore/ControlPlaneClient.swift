@@ -960,7 +960,8 @@ public struct MeshPeerTransport: Equatable, Sendable {
     }
 
     public var isTcpRelay: Bool {
-        !isP2P && tunnelProto.lowercased().contains("tcp")
+        let p = tunnelProto.lowercased()
+        return !isP2P && p.contains("tcp") && !p.contains("udp")
     }
 
     public var isUdpRelay: Bool {
