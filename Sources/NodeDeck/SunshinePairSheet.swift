@@ -11,7 +11,6 @@ struct SunshinePairSheet: View {
 
     @State private var address: String
     @State private var httpPortText: String
-    @State private var username: String
     @State private var password: String = ""
     @State private var isActivatingByAccount = false
     @State private var isPairing = false
@@ -23,7 +22,6 @@ struct SunshinePairSheet: View {
         _address = State(initialValue: initialAddress ?? host.hostName)
         let defaultPort = initialPort ?? 47989
         _httpPortText = State(initialValue: String(defaultPort))
-        _username = State(initialValue: host.user.isEmpty ? NSUserName() : host.user)
     }
 
     private var webUIURL: String {
@@ -144,25 +142,14 @@ struct SunshinePairSheet: View {
                 .frame(width: 96)
             }
 
-            HStack(spacing: 10) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(l10n.t("SSH 账号", "SSH Username"))
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                    TextField("ubuntu", text: $username)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 12.5, design: .monospaced))
-                }
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(l10n.t("登录密码", "Password"))
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                    SecureField(l10n.t("输入登录密码", "Enter password"), text: $password)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 12.5, design: .monospaced))
-                        .onSubmit { startAutoPairing() }
-                }
+            VStack(alignment: .leading, spacing: 4) {
+                Text(l10n.t("可选 Sudo 校验密码（留空则仅用当前 SSH 会话）", "Optional Sudo Password (leave empty to use SSH only)"))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                SecureField(l10n.t("留空跳过 sudo 校验", "Leave blank to skip sudo check"), text: $password)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12.5, design: .monospaced))
+                    .onSubmit { startAutoPairing() }
             }
 
             if let statusMessage {
@@ -207,9 +194,7 @@ struct SunshinePairSheet: View {
                 .keyboardShortcut(.defaultAction)
                 .disabled(
                     isPairing || isActivatingByAccount ||
-                        address.trimmingCharacters(in: .whitespaces).isEmpty ||
-                        username.trimmingCharacters(in: .whitespaces).isEmpty ||
-                        password.isEmpty
+                        address.trimmingCharacters(in: .whitespaces).isEmpty
                 )
             }
         }
@@ -241,10 +226,12 @@ struct SunshinePairSheet: View {
     private func startAutoPairing() {
         let trimmedAddr = address.trimmingCharacters(in: .whitespacesAndNewlines)
         let port = Int(httpPortText.trimmingCharacters(in: .whitespaces)) ?? 47989
-        let trimmedUser = username.trimmingCharacters(in: .whitespacesAndNewlines)
         isPairing = true
         errorMessage = nil
-        statusMessage = "正在通过 sudoer 校验并将证书直接写入 \(host.alias)（免 PIN）…"
+        statusMessage = l10n.t(
+            "正在通过 SSH 将本机证书直接写入 \(host.alias)（免 PIN）…",
+            "Injecting local client cert into \(host.alias) via SSH…"
+        )
 
         Task {
             do {
@@ -252,7 +239,6 @@ struct SunshinePairSheet: View {
                     hostAlias: host.alias,
                     address: trimmedAddr,
                     httpPort: port,
-                    username: trimmedUser,
                     password: password
                 )
                 store.saveSunshineHostConfig(paired)

@@ -1,12 +1,9 @@
 #include "Limelight-internal.h"
-#include <android/log.h>
 #include <fcntl.h>
 #include <jni.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-
-#define CRYPTO_LOG_TAG "NodeDeckCrypto"
 
 extern JNIEnv* nd_get_jni_env(void);
 extern jclass g_cryptoBridgeClass;

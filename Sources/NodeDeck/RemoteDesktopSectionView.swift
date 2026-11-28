@@ -1,3 +1,4 @@
+import AppKit
 import NodeDeckCore
 import SwiftUI
 
@@ -137,7 +138,9 @@ struct RemoteDesktopSectionView: View {
                         }
                         Divider()
                         Button(l10n.t("打开宿主机 Web 管理台", "Open Host Web UI")) {
-                            MoonlightLauncher.openSunshineWebUI(urlString: config.webUIURLString)
+                            if let url = URL(string: config.webUIURLString) {
+                                NSWorkspace.shared.open(url)
+                            }
                         }
                         Button(l10n.t("重新免 PIN 配对…", "Re-pair Host…")) {
                             store.presentPairSunshine(for: snapshot.host)

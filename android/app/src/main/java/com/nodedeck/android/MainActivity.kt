@@ -16,7 +16,6 @@ import androidx.compose.runtime.setValue
 import com.nodedeck.android.core.SSHHost
 import com.nodedeck.android.mesh.MeshConnectionState
 import com.nodedeck.android.mesh.MeshRuntimeController
-import com.nodedeck.android.mesh.NodeDeckVpnService
 import com.nodedeck.android.stream.StreamActivity
 import com.nodedeck.android.ui.AccountScreen
 import com.nodedeck.android.ui.ArchitectureGuideDialog

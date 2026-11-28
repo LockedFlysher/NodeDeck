@@ -38,7 +38,6 @@ mkdir -p \
   "$STAGE/opt/nodedeck/lib" \
   "$STAGE/opt/nodedeck/easytier" \
   "$STAGE/usr/local/bin" \
-  "$STAGE/usr/lib/systemd/system" \
   "$STAGE/usr/lib/systemd/user" \
   "$STAGE/usr/share/applications" \
   "$STAGE/usr/share/icons/hicolor/256x256/apps" \
@@ -131,7 +130,6 @@ bundle_so "libva-drm.so.2" "$STAGE/opt/nodedeck/lib"
 
 install -m 0755 "$ROOT/linux/nodedeck_linux.py" "$STAGE/opt/nodedeck/nodedeck_linux.py"
 install -m 0755 "$ROOT/linux/nodedeck_mesh_agent.py" "$STAGE/opt/nodedeck/nodedeck_mesh_agent.py"
-install -m 0644 "$ROOT/linux/nodedeck-mesh.service" "$STAGE/usr/lib/systemd/system/nodedeck-mesh.service"
 cat > "$STAGE/usr/lib/systemd/user/nodedeck-mesh.service" <<'EOF'
 [Unit]
 Description=NodeDeck User-Space Built-in EasyTier Mesh Agent (Zero-Sudo)

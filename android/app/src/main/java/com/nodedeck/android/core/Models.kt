@@ -5,10 +5,10 @@ import java.util.UUID
 import kotlin.math.pow
 import kotlin.math.roundToInt
 
-enum class SSHRouteKind(val label: String, val shortBadge: String) {
-    LOCAL_TUNNEL("Local Tunnel", "Tunnel"),
-    DIRECT_LAN("LAN Direct", "LAN"),
-    REMOTE("Remote", "WAN")
+enum class SSHRouteKind(val shortBadge: String) {
+    LOCAL_TUNNEL("Tunnel"),
+    DIRECT_LAN("LAN"),
+    REMOTE("WAN")
 }
 
 @Serializable
@@ -25,9 +25,6 @@ data class SSHHost(
     val proxyJumpAlias: String = "",
     val notes: String = ""
 ) {
-    val endpoint: String
-        get() = if (port == 22) hostName else "$hostName:$port"
-
     val loginTarget: String
         get() = if (port == 22) "$user@$hostName" else "$user@$hostName:$port"
 
@@ -192,9 +189,7 @@ data class SunshineHostConfig(
     val httpsPort: Int = 47984,
     val serverName: String = "",
     val isPaired: Boolean = true
-) {
-    val webUiUrl: String get() = "https://$address:${httpPort + 1}"
-}
+)
 
 data class SunshineServerInfo(
     val hostname: String,
@@ -238,7 +233,6 @@ data class LinuxHostProfile(
     val display: String = ":99",
     val basePort: Int = 47989,
     val encoder: String = "nvenc",
-    val cudaDeviceIndex: String = "0",
     val drmRenderNode: String = "/dev/dri/renderD128",
     val virtualAudioSink: Boolean = false,
     val clipboardSync: Boolean = true

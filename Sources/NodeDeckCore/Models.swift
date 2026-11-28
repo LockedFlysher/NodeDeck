@@ -270,10 +270,6 @@ public struct SlurmInfo: Sendable {
         nodes.filter { $0.category == .mixed }.count
     }
 
-    public var unavailableNodeCount: Int {
-        nodes.filter { $0.category == .unavailable }.count
-    }
-
     public var idleCPUs: Int {
         nodes.reduce(0) { $0 + $1.idleCPUs }
     }
@@ -384,11 +380,6 @@ public struct HostMetrics: Sendable {
         swapTotal > swapFree ? swapTotal - swapFree : 0
     }
 
-    public var swapFraction: Double {
-        guard swapTotal > 0 else { return 0 }
-        return min(max(Double(swapUsed) / Double(swapTotal), 0), 1)
-    }
-
     public var diskFraction: Double {
         guard diskTotal > 0 else { return 0 }
         return min(max(Double(diskUsed) / Double(diskTotal), 0), 1)
@@ -443,8 +434,6 @@ public struct HostProbeResult: Sendable {
         self.latencyMilliseconds = latencyMilliseconds
         self.errorMessage = errorMessage
     }
-
-    public var isSuccess: Bool { metrics != nil }
 }
 
 // MARK: - Directory Mount Models
@@ -459,14 +448,6 @@ public enum MountStrategy: String, Codable, CaseIterable, Hashable, Sendable {
         case .smbFirst: return "LAN SMB First (rclone Fallback)"
         case .sftpOnly: return "rclone SFTP Only"
         case .smbOnly: return "LAN SMB Only"
-        }
-    }
-
-    public var shortLabel: String {
-        switch self {
-        case .smbFirst: return "SMB → rclone"
-        case .sftpOnly: return "rclone SFTP"
-        case .smbOnly: return "SMB Only"
         }
     }
 }

@@ -22,7 +22,6 @@ object MoonlightNative {
     const val DR_OK = 0
     const val DR_NEED_IDR = -1
 
-    const val FRAME_TYPE_PFRAME = 0
     const val FRAME_TYPE_IDR = 1
 
     const val VIDEO_FORMAT_MASK_H265 = 0xFF00

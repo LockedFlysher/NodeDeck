@@ -161,7 +161,6 @@ struct StreamPerformanceStats: Equatable, Sendable {
     var networkRttMs: Int = 0
     var networkJitterMs: Int = 0
     var transportRoute: String = "Direct"
-    var decodedFrames: Int = 0
     var rendererStatus: String = "Ready"
 }
 
@@ -179,7 +178,6 @@ private final class MoonlightMediaPipeline: @unchecked Sendable {
     private var hasSubmittedKeyframe: Bool = false
     private var frameCounter: Int = 0
     private var bytesCounter: Int = 0
-    private var totalDecodedFrames: Int = 0
     private var lastHostLatencySumMs: Double = 0
     private var lastHostLatencyCount: Int = 0
     private var lastFPSCheck: CFTimeInterval = CACurrentMediaTime()
@@ -223,7 +221,6 @@ private final class MoonlightMediaPipeline: @unchecked Sendable {
         hasSubmittedKeyframe = false
         frameCounter = 0
         bytesCounter = 0
-        totalDecodedFrames = 0
         lastRendererStatus = "Ready"
         renderLock.unlock()
 
@@ -242,7 +239,6 @@ private final class MoonlightMediaPipeline: @unchecked Sendable {
         self.hasSubmittedKeyframe = false
         self.frameCounter = 0
         self.bytesCounter = 0
-        self.totalDecodedFrames = 0
         self.lastFPSCheck = CACurrentMediaTime()
         let isHEVC = (videoFormat & Int32(VIDEO_FORMAT_MASK_H265)) != 0
         let codec = isHEVC ? "HEVC (VideoToolbox)" : "H.264 (VideoToolbox)"
@@ -259,7 +255,6 @@ private final class MoonlightMediaPipeline: @unchecked Sendable {
             hostLatencyMs: 0,
             networkRttMs: 0,
             networkJitterMs: 0,
-            decodedFrames: 0,
             rendererStatus: "Initialized"
         ))
         return 0
@@ -331,7 +326,6 @@ private final class MoonlightMediaPipeline: @unchecked Sendable {
         }
 
         frameCounter += 1
-        totalDecodedFrames += 1
         bytesCounter += Int(du.fullLength)
         if du.frameHostProcessingLatency > 0 {
             lastHostLatencySumMs += Double(du.frameHostProcessingLatency) / 10.0
@@ -356,7 +350,6 @@ private final class MoonlightMediaPipeline: @unchecked Sendable {
             let dims = CMVideoFormatDescriptionGetDimensions(fmtDesc)
             let res = "\(dims.width)×\(dims.height)"
             let aspect = (dims.width > 0 && dims.height > 0) ? (Double(dims.width) / Double(dims.height)) : (16.0 / 9.0)
-            let total = totalDecodedFrames
             let statusStr = lastRendererStatus
             var rttVal: UInt32 = 0
             var rttVar: UInt32 = 0
@@ -378,7 +371,6 @@ private final class MoonlightMediaPipeline: @unchecked Sendable {
                 hostLatencyMs: avgHostMs,
                 networkRttMs: Int(rttVal),
                 networkJitterMs: Int(rttVar),
-                decodedFrames: total,
                 rendererStatus: statusStr
             ))
             return enqueueResult.ok ? Int32(DR_OK) : Int32(DR_NEED_IDR)
@@ -700,7 +692,6 @@ final class MoonlightStreamSession: ObservableObject {
     @Published var targetWidth: Int = 1920
     @Published var targetHeight: Int = 1080
     @Published var targetFPS: Int = 60
-    @Published var errorMessage: String?
     @Published var isPrivacyScreenEnabled: Bool = false
     @Published var isTogglingPrivacyScreen: Bool = false
     @Published var showPerformanceHUD: Bool = false
@@ -783,7 +774,6 @@ final class MoonlightStreamSession: ObservableObject {
         let myGen = LimelightLifecycle.shared.nextGeneration()
         activeGeneration = myGen
         isStopping = false
-        errorMessage = nil
         sshHostAlias = hostAlias
         currentAddress = address
         currentHTTPPort = httpPort
@@ -840,7 +830,6 @@ final class MoonlightStreamSession: ObservableObject {
             } catch {
                 guard !Task.isCancelled, LimelightLifecycle.shared.isCurrent(generation: myGen) else { return }
                 let msg = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-                self.errorMessage = msg
                 self.state = .disconnected(msg)
             }
         }
@@ -1112,7 +1101,6 @@ final class MoonlightStreamSession: ObservableObject {
         guard LimelightLifecycle.shared.isCurrent(generation: gen) else { return }
         LimelightLifecycle.shared.setInputAllowed(false)
         let msg = errorCode == 0 ? nil : "Stream terminated (error \(errorCode))."
-        errorMessage = msg
         state = .disconnected(msg)
         Task.detached(priority: .userInitiated) {
             await LimelightLifecycle.shared.stopConnection()
@@ -1304,7 +1292,6 @@ private func moonlightStageFailed(_ stage: Int32, _ errorCode: Int32) {
     Task { @MainActor in
         guard LimelightLifecycle.shared.isCurrent(generation: gen) else { return }
         let msg = "\(name) failed (error \(errorCode))."
-        session?.errorMessage = msg
         session?.state = .disconnected(msg)
     }
 }

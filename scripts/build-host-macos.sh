@@ -8,8 +8,6 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="$ROOT/third_party/sunshine"
 BUILD_DIR="$ROOT/.build/sunshine-macos"
 OUT_DIR="$ROOT/.build/host"
-OUT_BIN="$OUT_DIR/nodedeck-host"
-OUT_LIB="$OUT_DIR/host-lib"
 
 if [[ ! -f "$SRC/CMakeLists.txt" ]]; then
   echo "ERROR: third_party/sunshine submodule not initialized. Run: git submodule update --init --recursive" >&2

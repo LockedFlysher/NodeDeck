@@ -26,24 +26,11 @@ public enum MountOperationError: LocalizedError, Sendable {
 
 public enum MountManager {
     public static var defaultConfigFileURL: URL {
-        let appSupport = FileManager.default.homeDirectoryForCurrentUser
+        FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library")
             .appendingPathComponent("Application Support")
-        let nodeDeckFile = appSupport
             .appendingPathComponent("NodeDeck")
             .appendingPathComponent("mounts.json")
-        let legacyFile = appSupport
-            .appendingPathComponent("SSHDeck")
-            .appendingPathComponent("mounts.json")
-        if !FileManager.default.fileExists(atPath: nodeDeckFile.path),
-           FileManager.default.fileExists(atPath: legacyFile.path) {
-            try? FileManager.default.createDirectory(
-                at: nodeDeckFile.deletingLastPathComponent(),
-                withIntermediateDirectories: true
-            )
-            try? FileManager.default.copyItem(at: legacyFile, to: nodeDeckFile)
-        }
-        return nodeDeckFile
     }
 
     public static var logDirectoryURL: URL {
@@ -237,16 +224,6 @@ public enum MountManager {
             }
         }
         return candidates
-    }
-
-    public static func hasKeychainSMBCredential(server: String, account: String) -> Bool {
-        let res = ProcessRunner.run(
-            executable: "/usr/bin/security",
-            arguments: ["find-internet-password", "-s", server, "-a", account, "-r", "smb "],
-            discardOutput: true,
-            timeout: 3
-        )
-        return res.status == 0
     }
 
     public static func buildItems(

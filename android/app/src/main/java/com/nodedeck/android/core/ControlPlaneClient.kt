@@ -186,18 +186,6 @@ class ControlPlaneClient {
         postJson(serverUrl, "/api/v1/auth/login", body, token = null)
     }
 
-    suspend fun fetchState(serverUrl: String, token: String): ControlPlaneStateResponse =
-        withContext(Dispatchers.IO) {
-            val base = serverUrl.trimEnd('/')
-            val conn = (URL("$base/api/v1/state").openConnection() as HttpURLConnection).apply {
-                connectTimeout = 10_000
-                readTimeout = 10_000
-                requestMethod = "GET"
-                setRequestProperty("Authorization", "Bearer $token")
-            }
-            parseResponse(conn)
-        }
-
     suspend fun heartbeat(
         serverUrl: String,
         token: String,

@@ -443,7 +443,6 @@ def parse_ssh_hosts():
             if aliases:
                 cur = {
                     "alias": aliases[0],
-                    "alternates": aliases[1:],
                     "hostname": aliases[0],
                     "user": os.getenv("USER", "root"),
                     "port": "22",
@@ -458,6 +457,8 @@ def parse_ssh_hosts():
                 cur["user"] = v
             elif k == "port":
                 cur["port"] = v
+            elif k == "proxyjump":
+                cur["proxyjump"] = v
     return hosts
 
 
@@ -833,8 +834,7 @@ button.nd-seg-btn:hover {
     color: #d6e1ec;
     background-color: rgba(255, 255, 255, 0.04);
 }
-button.nd-seg-btn:checked,
-button.nd-seg-btn.nd-seg-active {
+button.nd-seg-btn:checked {
     background-color: rgba(20, 133, 117, 0.24);
     color: #5ce0cd;
     font-weight: 600;
@@ -2154,7 +2154,6 @@ class NodeDeckWindow(Gtk.Window):
                             "GPUS": [],
                             "PROCS": [],
                             "RTT_MS": sun_rtt,
-                            "SSH_OPTIONAL": True,
                         }
             self.metrics_cache[alias] = data
             GLib.idle_add(self._on_metrics_ready, alias, data)
@@ -2943,11 +2942,9 @@ class NodeDeckWindow(Gtk.Window):
         box.set_margin_end(14)
         e_addr = Gtk.Entry(text=host["hostname"])
         e_port = Gtk.Entry(text="47989")
-        e_user = Gtk.Entry(text=host["user"])
         for lbl_txt, widget in [
             (self.t("宿主机地址:", "Host Address:"), e_addr),
             (self.t("HTTP 端口:", "HTTP Port:"), e_port),
-            (self.t("SSH 账号:", "SSH User:"), e_user),
         ]:
             row = Gtk.Box(spacing=6)
             lbl = Gtk.Label(label=lbl_txt)
@@ -2960,9 +2957,8 @@ class NodeDeckWindow(Gtk.Window):
         if dlg.run() == Gtk.ResponseType.OK:
             addr = e_addr.get_text().strip()
             port = int(e_port.get_text().strip() or "47989")
-            user = e_user.get_text().strip()
             self.status_label.set_text(self.t(f"正在配对 {addr}:{port}…", f"Pairing with {addr}:{port}..."))
-            threading.Thread(target=self._pair_worker, args=(host["alias"], addr, port, user), daemon=True).start()
+            threading.Thread(target=self._pair_worker, args=(host["alias"], addr, port), daemon=True).start()
         dlg.destroy()
 
     def _account_activate_worker(self, host: dict):
@@ -3028,9 +3024,9 @@ class NodeDeckWindow(Gtk.Window):
         except Exception as exc:
             GLib.idle_add(self.status_label.set_text, self.t(f"账号激活失败: {exc}", f"Account activation failed: {exc}"))
 
-    def _pair_worker(self, alias, addr, port, user):
+    def _pair_worker(self, alias, addr, port):
         try:
-            cert, key, uid = ensure_client_cert()
+            cert, _, uid = ensure_client_cert()
             cert_b64 = base64.b64encode(cert.read_bytes()).decode()
             remote_py = f"""
 import base64, json, os, re, subprocess, sys, uuid

@@ -728,7 +728,6 @@ public enum EmbeddedEasyTierManager {
         let shellCmd = """
         mkdir -p /etc/nodedeck && chmod 700 /etc/nodedeck && \
         cp '\(escapedSrc)' '\(confDst)' && chmod 600 '\(confDst)' && \
-        launchctl bootout system /Library/LaunchDaemons/io.sshdeck.easytier.plist 2>/dev/null || true; \
         launchctl bootout system '\(plistPath)' 2>/dev/null || true; \
         cat > '\(plistPath)' <<'PLIST'
         <?xml version="1.0" encoding="UTF-8"?>

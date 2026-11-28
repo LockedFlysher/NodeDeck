@@ -685,35 +685,6 @@ final class NodeDeckCoreTests: XCTestCase {
         }
     }
 
-    func testPortForwardSpecsAndOpenableURL() {
-        let local = SSHPortForwardConfig(
-            hostAlias: "gpu-node",
-            label: "Jupyter",
-            direction: .local,
-            localHost: "127.0.0.1",
-            localPort: 8888,
-            remoteHost: "127.0.0.1",
-            remotePort: 8888,
-            urlScheme: "http"
-        )
-        XCTAssertEqual(local.sshForwardFlag, "-L")
-        XCTAssertEqual(local.sshForwardSpec, "127.0.0.1:8888:127.0.0.1:8888")
-        XCTAssertEqual(local.openableURLString, "http://127.0.0.1:8888")
-
-        let socks = SSHPortForwardConfig(
-            hostAlias: "workstation",
-            label: "Proxy",
-            direction: .dynamic,
-            localHost: "127.0.0.1",
-            localPort: 1080,
-            remoteHost: "127.0.0.1",
-            remotePort: 0
-        )
-        XCTAssertEqual(socks.sshForwardFlag, "-D")
-        XCTAssertEqual(socks.sshForwardSpec, "127.0.0.1:1080")
-        XCTAssertNil(socks.openableURLString)
-    }
-
     func testStreamRefreshRatesAndRecommendedBitrates() {
         XCTAssertEqual(StreamRefreshRate.allCases.map(\.fps), [60, 120, 144, 165])
         XCTAssertEqual(StreamRefreshRate.hz120.label, "120Hz")

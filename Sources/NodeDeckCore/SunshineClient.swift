@@ -71,7 +71,6 @@ public enum SunshineError: LocalizedError {
     case networkError(String)
     case invalidResponse(String)
     case pairingFailed(String)
-    case notPaired
     case launchFailed(String)
 
     public var errorDescription: String? {
@@ -84,8 +83,6 @@ public enum SunshineError: LocalizedError {
             return "Invalid Sunshine response: \(msg)"
         case .pairingFailed(let msg):
             return "Sunshine pairing failed: \(msg)"
-        case .notPaired:
-            return "This host is not paired with NodeDeck yet. Pair it with a PIN first."
         case .launchFailed(let msg):
             return "Failed to launch Sunshine stream: \(msg)"
         }
@@ -98,9 +95,7 @@ public final class SunshineClient: @unchecked Sendable {
     private let p12Password = "nodedeck-moonlight"
     private let lock = NSLock()
     private var cachedCertPEM: String?
-    private var cachedKeyPEM: String?
     private var cachedUniqueId: String?
-    private var cachedIdentity: SecIdentity?
     private var cachedSession: URLSession?
 
     private init() {}
@@ -132,17 +127,13 @@ public final class SunshineClient: @unchecked Sendable {
         try data.write(to: url, options: .atomic)
     }
 
-    public static func generateRandomPIN() -> String {
-        String(format: "%04d", Int.random(in: 0...9999))
-    }
-
     // MARK: - Client Identity (Cert + Key + PKCS12 + UniqueID)
 
-    private func ensureIdentity() throws -> (certPEM: String, keyPEM: String, uniqueId: String, session: URLSession) {
+    private func ensureIdentity() throws -> (certPEM: String, uniqueId: String, session: URLSession) {
         lock.lock()
-        if let cert = cachedCertPEM, let key = cachedKeyPEM, let uid = cachedUniqueId, let sess = cachedSession {
+        if let cert = cachedCertPEM, let uid = cachedUniqueId, let sess = cachedSession {
             lock.unlock()
-            return (cert, key, uid, sess)
+            return (cert, uid, sess)
         }
         lock.unlock()
 
@@ -174,7 +165,6 @@ public final class SunshineClient: @unchecked Sendable {
         }
 
         guard let certPEM = try? String(contentsOf: certURL, encoding: .utf8),
-              let keyPEM = try? String(contentsOf: keyURL, encoding: .utf8),
               let p12Data = try? Data(contentsOf: p12URL)
         else {
             throw SunshineError.identityCreationFailed
@@ -189,13 +179,11 @@ public final class SunshineClient: @unchecked Sendable {
 
         lock.lock()
         cachedCertPEM = certPEM
-        cachedKeyPEM = keyPEM
         cachedUniqueId = uniqueId
-        cachedIdentity = identity
         cachedSession = session
         lock.unlock()
 
-        return (certPEM, keyPEM, uniqueId, session)
+        return (certPEM, uniqueId, session)
     }
 
     private func loadPKCS12Identity(data: Data, password: String) throws -> SecIdentity {
@@ -215,7 +203,7 @@ public final class SunshineClient: @unchecked Sendable {
     // MARK: - API Calls
 
     public func fetchServerInfo(address: String, httpPort: Int = 47989) async throws -> SunshineServerInfo {
-        let (_, _, uniqueId, session) = try ensureIdentity()
+        let (_, uniqueId, session) = try ensureIdentity()
         let xml = try await requestXML(
             session: session,
             scheme: "http",
@@ -245,7 +233,7 @@ public final class SunshineClient: @unchecked Sendable {
     }
 
     public func fetchAppList(address: String, httpsPort: Int = 47984) async throws -> [SunshineApp] {
-        let (_, _, uniqueId, session) = try ensureIdentity()
+        let (_, uniqueId, session) = try ensureIdentity()
         let xml = try await requestXML(
             session: session,
             scheme: "https",
@@ -263,183 +251,6 @@ public final class SunshineClient: @unchecked Sendable {
         }
     }
 
-    public func pair(address: String, httpPort: Int = 47989, pin: String) async throws -> SunshineHostConfig {
-        let (certPEM, keyPEM, uniqueId, session) = try ensureIdentity()
-        let info = try await fetchServerInfo(address: address, httpPort: httpPort)
-
-        let salt = Self.randomBytes(count: 16)
-        let saltHex = Self.toHex(salt)
-        let clientCertHex = Self.toHex(Data(certPEM.utf8))
-
-        // Step 1: getservercert
-        let step1XML = try await requestXML(
-            session: session,
-            scheme: "http",
-            address: address,
-            port: httpPort,
-            path: "/pair",
-            query: [
-                "uniqueid": uniqueId,
-                "uuid": UUID().uuidString.replacingOccurrences(of: "-", with: ""),
-                "devicename": "roth",
-                "updateState": "1",
-                "phrase": "getservercert",
-                "salt": saltHex,
-                "clientcert": clientCertHex
-            ],
-            timeout: 45
-        )
-        let step1 = SimpleXMLParser.parse(step1XML)
-        guard step1.firstText("paired") == "1",
-              let plainCertHex = step1.firstText("plaincert"),
-              let serverCertData = Self.fromHex(plainCertHex),
-              let serverCertPEM = String(data: serverCertData, encoding: .utf8)
-        else {
-            throw SunshineError.pairingFailed("Host rejected PIN or pairing timed out (step 1).")
-        }
-
-        // Derive AES-128 key = SHA256(salt + pin)[0..<16]
-        var saltedPin = Data(salt)
-        saltedPin.append(Data(pin.utf8))
-        let aesKey = Self.sha256(saltedPin).prefix(16)
-
-        // Step 2: clientchallenge
-        let clientChallenge = Self.randomBytes(count: 16)
-        let encClientChallenge = try Self.aes128ECBEncrypt(key: Data(aesKey), data: clientChallenge)
-        let step2XML = try await requestXML(
-            session: session,
-            scheme: "http",
-            address: address,
-            port: httpPort,
-            path: "/pair",
-            query: [
-                "uniqueid": uniqueId,
-                "uuid": UUID().uuidString.replacingOccurrences(of: "-", with: ""),
-                "devicename": "roth",
-                "updateState": "1",
-                "clientchallenge": Self.toHex(encClientChallenge)
-            ]
-        )
-        let step2 = SimpleXMLParser.parse(step2XML)
-        guard step2.firstText("paired") == "1",
-              let challengeRespHex = step2.firstText("challengeresponse"),
-              let challengeRespEnc = Self.fromHex(challengeRespHex)
-        else {
-            throw SunshineError.pairingFailed("Server rejected challenge (step 2).")
-        }
-
-        let challengeRespDec = try Self.aes128ECBDecrypt(key: Data(aesKey), data: challengeRespEnc)
-        guard challengeRespDec.count >= 48 else {
-            throw SunshineError.pairingFailed("Unexpected challenge response length.")
-        }
-        let serverResponseHash = challengeRespDec.subdata(in: 0..<32)
-        let serverChallenge = challengeRespDec.subdata(in: 32..<48)
-
-        // Step 3: serverchallengeresp
-        let clientCertSig = try Self.extractCertSignature(certPEM: certPEM)
-        let clientSecret = Self.randomBytes(count: 16)
-        var respInput = Data()
-        respInput.append(serverChallenge)
-        respInput.append(clientCertSig)
-        respInput.append(clientSecret)
-        let clientRespHash = Self.sha256(respInput)
-        let encClientRespHash = try Self.aes128ECBEncrypt(key: Data(aesKey), data: clientRespHash)
-
-        let step3XML = try await requestXML(
-            session: session,
-            scheme: "http",
-            address: address,
-            port: httpPort,
-            path: "/pair",
-            query: [
-                "uniqueid": uniqueId,
-                "uuid": UUID().uuidString.replacingOccurrences(of: "-", with: ""),
-                "devicename": "roth",
-                "updateState": "1",
-                "serverchallengeresp": Self.toHex(encClientRespHash)
-            ]
-        )
-        let step3 = SimpleXMLParser.parse(step3XML)
-        guard step3.firstText("paired") == "1",
-              let pairingSecretHex = step3.firstText("pairingsecret"),
-              let pairingSecret = Self.fromHex(pairingSecretHex),
-              pairingSecret.count > 16
-        else {
-            throw SunshineError.pairingFailed("Server rejected PIN challenge response (step 3 — check PIN).")
-        }
-
-        let serverSecret = pairingSecret.subdata(in: 0..<16)
-        let serverSignature = pairingSecret.subdata(in: 16..<pairingSecret.count)
-
-        guard Self.verifySHA256(certPEM: serverCertPEM, data: serverSecret, signature: serverSignature) else {
-            throw SunshineError.pairingFailed("Server signature verification failed.")
-        }
-
-        let serverCertSig = try Self.extractCertSignature(certPEM: serverCertPEM)
-        var expectedServerHashInput = Data()
-        expectedServerHashInput.append(clientChallenge)
-        expectedServerHashInput.append(serverCertSig)
-        expectedServerHashInput.append(serverSecret)
-        guard Self.sha256(expectedServerHashInput) == serverResponseHash else {
-            throw SunshineError.pairingFailed("PIN mismatch during pairing verification.")
-        }
-
-        // Step 4: clientpairingsecret
-        let clientSignature = try Self.signSHA256(keyPEM: keyPEM, data: clientSecret)
-        var clientPairingSecret = Data()
-        clientPairingSecret.append(clientSecret)
-        clientPairingSecret.append(clientSignature)
-
-        let step4XML = try await requestXML(
-            session: session,
-            scheme: "http",
-            address: address,
-            port: httpPort,
-            path: "/pair",
-            query: [
-                "uniqueid": uniqueId,
-                "uuid": UUID().uuidString.replacingOccurrences(of: "-", with: ""),
-                "devicename": "roth",
-                "updateState": "1",
-                "clientpairingsecret": Self.toHex(clientPairingSecret)
-            ]
-        )
-        let step4 = SimpleXMLParser.parse(step4XML)
-        guard step4.firstText("paired") == "1" else {
-            throw SunshineError.pairingFailed("Server rejected client pairing secret (step 4).")
-        }
-
-        // Step 5: HTTPS pairchallenge
-        let step5XML = try await requestXML(
-            session: session,
-            scheme: "https",
-            address: address,
-            port: info.httpsPort,
-            path: "/pair",
-            query: [
-                "uniqueid": uniqueId,
-                "uuid": UUID().uuidString.replacingOccurrences(of: "-", with: ""),
-                "devicename": "roth",
-                "updateState": "1",
-                "phrase": "pairchallenge"
-            ]
-        )
-        let step5 = SimpleXMLParser.parse(step5XML)
-        guard step5.firstText("paired") == "1" else {
-            throw SunshineError.pairingFailed("HTTPS pairchallenge failed (step 5).")
-        }
-
-        return SunshineHostConfig(
-            hostAlias: info.hostname,
-            address: address,
-            httpPort: httpPort,
-            httpsPort: info.httpsPort,
-            serverName: info.hostname,
-            serverCertPEM: serverCertPEM,
-            isPaired: true
-        )
-    }
-
     public func launchStream(
         address: String,
         httpPort: Int = 47989,
@@ -448,7 +259,7 @@ public final class SunshineClient: @unchecked Sendable {
         height: Int = 1080,
         fps: Int = 60
     ) async throws -> SunshineLaunchSession {
-        let (_, _, uniqueId, session) = try ensureIdentity()
+        let (_, uniqueId, session) = try ensureIdentity()
         let info = try await fetchServerInfo(address: address, httpPort: httpPort)
         let apps = try await fetchAppList(address: address, httpsPort: info.httpsPort)
 
@@ -510,68 +321,13 @@ public final class SunshineClient: @unchecked Sendable {
         )
     }
 
-    public func submitPIN(
-        address: String,
-        webPort: Int,
-        username: String,
-        password: String,
-        pin: String,
-        clientName: String = "NodeDeck"
-    ) async throws {
-        let (_, _, _, session) = try ensureIdentity()
-        guard let url = URL(string: "https://\(address):\(webPort)/api/pin") else {
-            throw SunshineError.networkError("Invalid Sunshine Web UI URL.")
-        }
-        var req = URLRequest(url: url, timeoutInterval: 12)
-        req.httpMethod = "POST"
-        let creds = Data("\(username):\(password)".utf8).base64EncodedString()
-        req.setValue("Basic \(creds)", forHTTPHeaderField: "Authorization")
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let payload: [String: String] = ["pin": pin, "name": clientName]
-        req.httpBody = try JSONSerialization.data(withJSONObject: payload)
-
-        let (data, response) = try await session.data(for: req)
-        if let http = response as? HTTPURLResponse {
-            if http.statusCode == 401 {
-                throw SunshineError.pairingFailed("Sunshine Web UI 账号或密码错误 (HTTP 401)。")
-            }
-            guard (200...299).contains(http.statusCode) else {
-                let body = String(data: data, encoding: .utf8) ?? ""
-                throw SunshineError.pairingFailed("Sunshine /api/pin 返回 HTTP \(http.statusCode): \(body)")
-            }
-        }
-    }
-
-    public func pairWithCredentials(
-        address: String,
-        httpPort: Int = 47989,
-        username: String,
-        password: String
-    ) async throws -> SunshineHostConfig {
-        let pin = Self.generateRandomPIN()
-        let webPort = httpPort + 1
-
-        async let pairTask = pair(address: address, httpPort: httpPort, pin: pin)
-        // Give step 1 (/pair?phrase=getservercert) a brief moment to register pending PIN on Sunshine
-        try? await Task.sleep(nanoseconds: 450_000_000)
-        try await submitPIN(
-            address: address,
-            webPort: webPort,
-            username: username,
-            password: password,
-            pin: pin
-        )
-        return try await pairTask
-    }
-
     public func pairViaSudoerSSH(
         hostAlias: String,
         address: String,
         httpPort: Int = 47989,
-        username: String,
         password: String
     ) async throws -> SunshineHostConfig {
-        let (certPEM, _, uniqueId, _) = try ensureIdentity()
+        let (certPEM, uniqueId, _) = try ensureIdentity()
         let certB64 = Data(certPEM.utf8).base64EncodedString()
         let passB64 = Data(password.utf8).base64EncodedString()
         let clientName = "NodeDeck-\(Host.current().localizedName ?? "Mac")"
@@ -715,7 +471,7 @@ public final class SunshineClient: @unchecked Sendable {
     }
 
     public func cancelSession(address: String, httpsPort: Int = 47984) async {
-        guard let (_, _, uniqueId, session) = try? ensureIdentity() else { return }
+        guard let (_, uniqueId, session) = try? ensureIdentity() else { return }
         _ = try? await requestXML(
             session: session,
             scheme: "https",
@@ -776,100 +532,6 @@ public final class SunshineClient: @unchecked Sendable {
 
     private static func toHex(_ data: Data) -> String {
         data.map { String(format: "%02x", $0) }.joined()
-    }
-
-    private static func fromHex(_ hex: String) -> Data? {
-        let cleaned = hex.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard cleaned.count % 2 == 0 else { return nil }
-        var out = Data(capacity: cleaned.count / 2)
-        var idx = cleaned.startIndex
-        while idx < cleaned.endIndex {
-            let next = cleaned.index(idx, offsetBy: 2)
-            guard let b = UInt8(cleaned[idx..<next], radix: 16) else { return nil }
-            out.append(b)
-            idx = next
-        }
-        return out
-    }
-
-    private static func sha256(_ data: Data) -> Data {
-        var out = [UInt8](repeating: 0, count: 32)
-        data.withUnsafeBytes { ptr in
-            let base = ptr.bindMemory(to: UInt8.self).baseAddress
-            _ = nd_sha256(base, data.count, &out)
-        }
-        return Data(out)
-    }
-
-    private static func aes128ECBEncrypt(key: Data, data: Data) throws -> Data {
-        var out = [UInt8](repeating: 0, count: data.count)
-        let rc = key.withUnsafeBytes { keyPtr in
-            data.withUnsafeBytes { inPtr in
-                nd_aes128_ecb_encrypt(
-                    keyPtr.bindMemory(to: UInt8.self).baseAddress,
-                    inPtr.bindMemory(to: UInt8.self).baseAddress,
-                    data.count,
-                    &out
-                )
-            }
-        }
-        guard rc == 0 else { throw SunshineError.pairingFailed("AES encrypt failed") }
-        return Data(out)
-    }
-
-    private static func aes128ECBDecrypt(key: Data, data: Data) throws -> Data {
-        var out = [UInt8](repeating: 0, count: data.count)
-        let rc = key.withUnsafeBytes { keyPtr in
-            data.withUnsafeBytes { inPtr in
-                nd_aes128_ecb_decrypt(
-                    keyPtr.bindMemory(to: UInt8.self).baseAddress,
-                    inPtr.bindMemory(to: UInt8.self).baseAddress,
-                    data.count,
-                    &out
-                )
-            }
-        }
-        guard rc == 0 else { throw SunshineError.pairingFailed("AES decrypt failed") }
-        return Data(out)
-    }
-
-    private static func extractCertSignature(certPEM: String) throws -> Data {
-        var out = [UInt8](repeating: 0, count: 1024)
-        var outLen = out.count
-        let rc = certPEM.withCString { cstr in
-            nd_extract_cert_signature_pem(cstr, &out, &outLen)
-        }
-        guard rc == 0 else { throw SunshineError.pairingFailed("Failed to extract cert signature") }
-        return Data(out.prefix(outLen))
-    }
-
-    private static func signSHA256(keyPEM: String, data: Data) throws -> Data {
-        var out = [UInt8](repeating: 0, count: 1024)
-        var outLen = out.count
-        let rc = keyPEM.withCString { cstr in
-            data.withUnsafeBytes { ptr in
-                nd_sign_sha256_pem(cstr, ptr.bindMemory(to: UInt8.self).baseAddress, data.count, &out, &outLen)
-            }
-        }
-        guard rc == 0 else { throw SunshineError.pairingFailed("RSA sign failed") }
-        return Data(out.prefix(outLen))
-    }
-
-    private static func verifySHA256(certPEM: String, data: Data, signature: Data) -> Bool {
-        let rc = certPEM.withCString { cstr in
-            data.withUnsafeBytes { dPtr in
-                signature.withUnsafeBytes { sPtr in
-                    nd_verify_sha256_pem(
-                        cstr,
-                        dPtr.bindMemory(to: UInt8.self).baseAddress,
-                        data.count,
-                        sPtr.bindMemory(to: UInt8.self).baseAddress,
-                        signature.count
-                    )
-                }
-            }
-        }
-        return rc == 1
     }
 }
 

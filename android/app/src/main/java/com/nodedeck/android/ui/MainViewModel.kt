@@ -64,7 +64,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val activeForwardIds: StateFlow<Set<String>> = _activeForwardIds.asStateFlow()
 
     private val _hostProfiles = MutableStateFlow<List<LinuxHostProfile>>(emptyList())
-    val hostProfiles: StateFlow<List<LinuxHostProfile>> = _hostProfiles.asStateFlow()
 
     private val _pinnedAliases = MutableStateFlow<Set<String>>(emptySet())
     val pinnedAliases: StateFlow<Set<String>> = _pinnedAliases.asStateFlow()
@@ -82,7 +81,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val streamRefreshRate: StateFlow<StreamRefreshRate> = _streamRefreshRate.asStateFlow()
 
     private val _refreshIntervalSec = MutableStateFlow(store.getRefreshIntervalSec())
-    val refreshIntervalSec: StateFlow<Int> = _refreshIntervalSec.asStateFlow()
 
     private val _isRefreshingAll = MutableStateFlow(false)
     val isRefreshingAll: StateFlow<Boolean> = _isRefreshingAll.asStateFlow()
@@ -421,12 +419,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun setStreamRefreshRate(rate: StreamRefreshRate) {
         _streamRefreshRate.value = rate
         store.setStreamRefreshRate(rate)
-    }
-
-    fun setRefreshIntervalSec(sec: Int) {
-        _refreshIntervalSec.value = sec
-        store.setRefreshIntervalSec(sec)
-        restartAutoRefreshLoop()
     }
 
     fun togglePinned(alias: String) {

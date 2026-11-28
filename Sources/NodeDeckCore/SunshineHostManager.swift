@@ -15,10 +15,6 @@ public struct LocalHostPermissionStatus: Equatable, Sendable {
     public let sshRemoteLogin: Bool
     public let lastLogHint: String?
 
-    public var allReadyForDesktop: Bool {
-        screenRecording && accessibility
-    }
-
     public init(
         screenRecording: Bool = false,
         accessibility: Bool = false,
@@ -87,11 +83,6 @@ public final class SunshineHostManager: @unchecked Sendable {
 
     public static func findBinary() -> String? {
         candidateBinaries.first { FileManager.default.isExecutableFile(atPath: $0) }
-    }
-
-    public static var isBundledHostAvailable: Bool {
-        FileManager.default.isExecutableFile(atPath: bundledBinaryPath) ||
-        FileManager.default.isExecutableFile(atPath: legacyBundledAppBinaryPath)
     }
 
     public static func checkPermissions() -> LocalHostPermissionStatus {

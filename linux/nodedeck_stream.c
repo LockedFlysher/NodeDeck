@@ -1,7 +1,6 @@
 #include <SDL2/SDL.h>
 #include <libavcodec/avcodec.h>
 #include <libavutil/hwcontext.h>
-#include <libavutil/imgutils.h>
 #include <libswscale/swscale.h>
 #include <opus/opus_multistream.h>
 

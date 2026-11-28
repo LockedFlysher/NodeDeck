@@ -99,20 +99,10 @@ class SecureStore(context: Context) {
 
     fun getRefreshIntervalSec(): Int = prefs.getInt("refresh_interval_sec", 30)
 
-    fun setRefreshIntervalSec(sec: Int) {
-        prefs.edit().putInt("refresh_interval_sec", sec).apply()
-    }
-
     fun getTouchpadMode(): Boolean = prefs.getBoolean("stream_touchpad_mode", true)
 
     fun setTouchpadMode(enabled: Boolean) {
         prefs.edit().putBoolean("stream_touchpad_mode", enabled).apply()
-    }
-
-    fun getClipboardAutoSync(): Boolean = prefs.getBoolean("clipboard_auto_sync", true)
-
-    fun setClipboardAutoSync(enabled: Boolean) {
-        prefs.edit().putBoolean("clipboard_auto_sync", enabled).apply()
     }
 
     fun isMeshAlwaysOn(): Boolean = prefs.getBoolean("mesh_always_on", true)

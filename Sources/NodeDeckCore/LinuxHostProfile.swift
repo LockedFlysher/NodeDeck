@@ -6,13 +6,6 @@ public enum LinuxHostDisplayMode: String, Codable, CaseIterable, Identifiable, S
     case isolatedVirtualDesktop
 
     public var id: String { rawValue }
-
-    public var title: String {
-        switch self {
-        case .physicalDesktop: return "物理桌面直采 (单用户)"
-        case .isolatedVirtualDesktop: return "隔离虚拟桌面 (多用户 :99)"
-        }
-    }
 }
 
 public struct LinuxHostProfile: Identifiable, Codable, Equatable, Sendable {

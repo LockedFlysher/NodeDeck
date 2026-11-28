@@ -48,7 +48,6 @@ public enum StreamRefreshRate: Int, CaseIterable, Identifiable, Codable, Sendabl
     public var id: Int { rawValue }
     public var fps: Int { rawValue }
     public var label: String { "\(rawValue)Hz" }
-    public var fpsLabel: String { "\(rawValue)fps" }
     public var clientRefreshRateX100: Int { rawValue * 100 }
 }
 

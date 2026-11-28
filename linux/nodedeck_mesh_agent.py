@@ -360,12 +360,9 @@ def register_local_ssh_pubkey(server_url: str, token: str, device_name: str, tar
 
 def reload_user_sunshine(target_user: str, start_if_stopped: bool = False) -> bool:
     try:
-        pw = pwd.getpwnam(target_user)
-        uid = pw.pw_uid
-        home = Path(pw.pw_dir)
+        uid = pwd.getpwnam(target_user).pw_uid
     except KeyError:
         uid = os.getuid()
-        home = Path.home()
 
     env = os.environ.copy()
     env["XDG_RUNTIME_DIR"] = f"/run/user/{uid}"

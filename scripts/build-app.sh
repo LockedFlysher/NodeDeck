@@ -8,7 +8,6 @@ APP_PATH="$ROOT/dist/$APP_NAME"
 UNIVERSAL="${UNIVERSAL:-0}"
 INSTALL="${INSTALL:-0}"
 HOST_APP="${HOST_APP:-$ROOT/.build/host/NodeDeckHost.app}"
-HOST_BIN="${HOST_BIN:-$ROOT/.build/host/nodedeck-host}"
 
 cd "$ROOT"
 mkdir -p "$ROOT/.build" "$ROOT/dist"
@@ -85,14 +84,6 @@ if [[ -d "$HOST_APP" && -x "$HOST_APP/Contents/MacOS/nodedeck-host" ]]; then
     if [[ -d "$HOST_APP/Contents/Resources/assets" ]]; then
         rm -rf "$APP_PATH/Contents/Resources/assets"
         ditto "$HOST_APP/Contents/Resources/assets" "$APP_PATH/Contents/Resources/assets"
-    fi
-elif [[ -x "$HOST_BIN" ]]; then
-    cp "$HOST_BIN" "$APP_PATH/Contents/MacOS/nodedeck-host"
-    chmod 0755 "$APP_PATH/Contents/MacOS/nodedeck-host"
-    HOST_LIB_DIR="$(dirname "$HOST_BIN")/host-lib"
-    if [[ -d "$HOST_LIB_DIR" ]] && [[ -n "$(ls -A "$HOST_LIB_DIR" 2>/dev/null)" ]]; then
-        rm -rf "$APP_PATH/Contents/MacOS/host-lib"
-        ditto "$HOST_LIB_DIR" "$APP_PATH/Contents/MacOS/host-lib"
     fi
 fi
 

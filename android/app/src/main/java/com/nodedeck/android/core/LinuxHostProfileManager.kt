@@ -17,16 +17,13 @@ import base64, json, os, subprocess
 
 prof = json.loads(base64.b64decode("$payloadB64").decode("utf-8"))
 home = os.path.expanduser("~")
-uid = os.getuid()
 nd_conf = os.path.join(home, ".config", "nodedeck")
 host_conf_dir = os.path.join(nd_conf, "host")
 os.makedirs(host_conf_dir, exist_ok=True)
 
 mode = prof["mode"]
-display = prof["display"].strip() or ":99"
 base_port = int(prof["basePort"])
 encoder = prof["encoder"].strip() or "nvenc"
-cuda_idx = prof["cudaDeviceIndex"].strip()
 render_node = prof["drmRenderNode"].strip()
 virtual_audio = bool(prof["virtualAudioSink"])
 clipboard = bool(prof["clipboardSync"])

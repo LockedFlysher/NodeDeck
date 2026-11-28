@@ -443,11 +443,6 @@ class SshManager(private val store: SecureStore) {
         activeForwards.remove(id)?.stop()
     }
 
-    fun stopAllPortForwards() {
-        val keys = activeForwards.keys.toList()
-        keys.forEach { stopPortForward(it) }
-    }
-
     private fun handleSocks5Client(client: Socket, session: Session) {
         var channel: ChannelDirectTCPIP? = null
         try {

@@ -19,18 +19,6 @@ enum AppLanguage: String, CaseIterable, Identifiable {
             return "English"
         }
     }
-
-    @MainActor
-    var shortBadge: String {
-        switch self {
-        case .system:
-            return AppLocalization.shared.isChinese ? "中" : "EN"
-        case .zhHans:
-            return "中"
-        case .en:
-            return "EN"
-        }
-    }
 }
 
 @MainActor

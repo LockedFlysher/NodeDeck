@@ -34,7 +34,6 @@ final class HostMonitor: ObservableObject {
     @Published private(set) var isScanning = false
     @Published private(set) var isRefreshing = false
     @Published private(set) var scanError: String?
-    @Published private(set) var lastRefresh: Date?
 
     // Directory mount state
     @Published var mountConfigs: [FolderMountConfig] = []
@@ -115,7 +114,6 @@ final class HostMonitor: ObservableObject {
     let configURL: URL
     private let mountsURL: URL
     private var hasStarted = false
-    private var isShuttingDown = false
     private var scanTask: Task<Void, Never>?
     private var refreshTask: Task<Void, Never>?
     private var autoRefreshTask: Task<Void, Never>?
@@ -214,7 +212,6 @@ final class HostMonitor: ObservableObject {
     func start() {
         guard !hasStarted else { return }
         hasStarted = true
-        isShuttingDown = false
         launchAtLogin = LaunchAtLoginManager.isEnabled()
 
         portForwardConfigs = PortForwardManager.loadConfigs()
@@ -235,7 +232,6 @@ final class HostMonitor: ObservableObject {
     }
 
     func stop() {
-        isShuttingDown = true
         scanTask?.cancel()
         refreshTask?.cancel()
         autoRefreshTask?.cancel()
@@ -791,7 +787,6 @@ final class HostMonitor: ObservableObject {
                     guard var snapshot = snapshots[alias] else { continue }
                     apply(result, to: &snapshot)
                     snapshots[alias] = snapshot
-                    lastRefresh = Date()
                     if snapshot.state == .online {
                         let onlineHost = snapshot.host
                         Task {
@@ -805,7 +800,6 @@ final class HostMonitor: ObservableObject {
             if !Task.isCancelled {
                 await autoMountOnlineHostsIfNeeded()
                 isRefreshing = false
-                lastRefresh = Date()
             }
         }
     }
@@ -827,7 +821,6 @@ final class HostMonitor: ObservableObject {
             guard var updated = snapshots[alias] else { return }
             apply(result, to: &updated)
             snapshots[alias] = updated
-            lastRefresh = Date()
         }
     }
 
