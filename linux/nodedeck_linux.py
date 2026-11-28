@@ -3246,6 +3246,51 @@ class NodeDeckWindow(Gtk.Window):
             hdr_row.pack_end(_make_badge(self.t("尚未配对", "Not Paired"), "nd-badge-neutral"), False, False, 0)
         rd_card.pack_start(hdr_row, False, False, 0)
 
+        # Explicit Stream Network Path Banner (P2P UDP vs UDP Relay vs TCP Relay)
+        route_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        r_title = Gtk.Label(label=self.t("串流网络方案", "Stream Path"))
+        r_title.get_style_context().add_class("nd-dim")
+        r_title.set_width_chars(10)
+        r_title.set_xalign(0)
+        route_row.pack_start(r_title, False, False, 0)
+
+        target_addr = saved["address"] if saved else h["hostname"]
+        rd_mesh = match_easytier_transport(self.mesh_transports, target_addr, h["alias"])
+        if rd_mesh:
+            if rd_mesh["is_p2p"]:
+                r_cls = "nd-badge-lan" if "tcp" in rd_mesh.get("proto", "") else "nd-badge-online"
+                r_desc = self.t(
+                    f"点对点直连 ({rd_mesh['detailed']})",
+                    f"Direct P2P ({rd_mesh['detailed']})",
+                )
+            else:
+                r_cls = "nd-badge-offline" if rd_mesh.get("is_tcp_relay") else "nd-badge-checking"
+                via_str = f" · via {rd_mesh['relay_via']}" if rd_mesh.get("relay_via") else ""
+                r_desc = self.t(
+                    f"中继转发 ({rd_mesh['detailed']}{via_str})",
+                    f"Relayed ({rd_mesh['detailed']}{via_str})",
+                )
+            route_row.pack_start(_make_badge(rd_mesh["badge"], r_cls), False, False, 0)
+            r_detail = Gtk.Label(label=r_desc)
+            r_detail.get_style_context().add_class("nd-dim")
+            r_detail.get_style_context().add_class("nd-mono")
+            r_detail.set_xalign(0)
+            r_detail.set_ellipsize(3)
+            route_row.pack_start(r_detail, True, True, 0)
+        else:
+            fallback_badge = "LAN Direct" if _is_lan_or_mesh_host(target_addr) else "WAN Direct"
+            route_row.pack_start(_make_badge(fallback_badge, "nd-badge-lan"), False, False, 0)
+            r_detail = Gtk.Label(label=self.t("非 EasyTier 中继或正在探测链路…", "Non-mesh path or probing peers…"))
+            r_detail.get_style_context().add_class("nd-dim")
+            r_detail.set_xalign(0)
+            route_row.pack_start(r_detail, True, True, 0)
+        btn_refresh_route = Gtk.Button(label="↻")
+        btn_refresh_route.get_style_context().add_class("nd-btn-ghost")
+        btn_refresh_route.set_tooltip_text(self.t("刷新实时 P2P / Relay 链路状态", "Refresh live P2P / Relay link status"))
+        btn_refresh_route.connect("clicked", lambda *_: self.refresh_mesh_transports_async())
+        route_row.pack_end(btn_refresh_route, False, False, 0)
+        rd_card.pack_start(route_row, False, False, 0)
+
         # Resolution pills
         res_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         rl = Gtk.Label(label=self.t("分辨率", "Resolution"))
@@ -3873,7 +3918,8 @@ print(f"OK:{{detected_port}}")
             log_fh = open(log_path, "w", encoding="utf-8")
             proc = subprocess.Popen(
                 [
-                    stream_bin, "--host", addr, "--appver", appver, "--gfever", gfever,
+                    stream_bin, "--host", addr, "--alias", host_alias or addr,
+                    "--appver", appver, "--gfever", gfever,
                     "--rtsp", rtsp, "--rikey", rikey, "--rikeyid", rikeyid,
                     "--width", w_str, "--height", h_str, "--fps", fps_str,
                     "--bitrate", str(bitrate_kbps),
