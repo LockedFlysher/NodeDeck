@@ -1,0 +1,15 @@
+[package]
+name = "nodedeck-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Phase 2 Flutter <-> Rust bridge facade (flutter_rust_bridge API surface over nodedeck-core)"
+
+[lib]
+crate-type = ["rlib", "cdylib", "staticlib"]
+
+[dependencies]
+nodedeck-core = { path = "../nodedeck-core" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true

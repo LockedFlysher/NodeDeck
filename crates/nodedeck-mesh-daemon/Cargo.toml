@@ -9,6 +9,7 @@ description = "Pure-Rust zero-Python mesh daemon & CLI replacing linux/nodedeck_
 nodedeck-core = { path = "../nodedeck-core" }
 anyhow.workspace = true
 clap.workspace = true
+dirs.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 hostname.workspace = true

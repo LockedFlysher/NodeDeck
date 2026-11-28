@@ -2223,10 +2223,14 @@ class NodeDeckWindow(Gtk.Window):
             dlg.destroy()
             if resp == Gtk.ResponseType.REJECT:
                 try:
-                    agent = Path("/opt/nodedeck/nodedeck_mesh_agent.py")
-                    if not agent.exists():
-                        agent = Path(__file__).resolve().parent / "nodedeck_mesh_agent.py"
-                    subprocess.run(["python3", str(agent), "logout"], timeout=10)
+                    rust_bin = Path("/opt/nodedeck/nodedeck-mesh-daemon")
+                    if rust_bin.exists() and os.access(rust_bin, os.X_OK):
+                        subprocess.run([str(rust_bin), "logout"], timeout=10)
+                    else:
+                        agent = Path("/opt/nodedeck/nodedeck_mesh_agent.py")
+                        if not agent.exists():
+                            agent = Path(__file__).resolve().parent / "nodedeck_mesh_agent.py"
+                        subprocess.run(["python3", str(agent), "logout"], timeout=10)
                 except Exception:
                     pass
                 self._update_chrome_labels()
@@ -2280,10 +2284,14 @@ class NodeDeckWindow(Gtk.Window):
         if resp != Gtk.ResponseType.OK or not u or not p:
             return
 
-        agent = Path("/opt/nodedeck/nodedeck_mesh_agent.py")
-        if not agent.exists():
-            agent = Path(__file__).resolve().parent / "nodedeck_mesh_agent.py"
-        cmd = ["python3", str(agent), mode, "--server", srv, "--username", u, "--password", p, "--role", "both"]
+        rust_bin = Path("/opt/nodedeck/nodedeck-mesh-daemon")
+        if rust_bin.exists() and os.access(rust_bin, os.X_OK):
+            cmd = [str(rust_bin), mode, "--server", srv, "--username", u, "--password", p, "--role", "both"]
+        else:
+            agent = Path("/opt/nodedeck/nodedeck_mesh_agent.py")
+            if not agent.exists():
+                agent = Path(__file__).resolve().parent / "nodedeck_mesh_agent.py"
+            cmd = ["python3", str(agent), mode, "--server", srv, "--username", u, "--password", p, "--role", "both"]
         if mode == "register":
             cmd += ["--invite", inv]
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=20)

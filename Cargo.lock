@@ -598,6 +598,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "nodedeck-bridge"
+version = "3.0.0-alpha.1"
+dependencies = [
+ "nodedeck-core",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "nodedeck-core"
 version = "3.0.0-alpha.1"
 dependencies = [
@@ -615,6 +625,7 @@ version = "3.0.0-alpha.1"
 dependencies = [
  "anyhow",
  "clap",
+ "dirs",
  "hostname",
  "nodedeck-core",
  "serde_json",

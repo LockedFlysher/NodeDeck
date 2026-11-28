@@ -13,7 +13,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-VERSION="${VERSION:-2.1.0}"
+VERSION="${VERSION:-2.2.0}"
 BUNDLE_HOST="${BUNDLE_HOST:-1}"
 STATIC_FFMPEG="${STATIC_FFMPEG:-1}"
 STATIC_SDL2="${STATIC_SDL2:-1}"
@@ -130,14 +130,40 @@ bundle_so "libva-drm.so.2" "$STAGE/opt/nodedeck/lib"
 
 install -m 0755 "$ROOT/linux/nodedeck_linux.py" "$STAGE/opt/nodedeck/nodedeck_linux.py"
 install -m 0755 "$ROOT/linux/nodedeck_mesh_agent.py" "$STAGE/opt/nodedeck/nodedeck_mesh_agent.py"
-cat > "$STAGE/usr/lib/systemd/user/nodedeck-mesh.service" <<'EOF'
+
+# Build & bundle pure-Rust static nodedeck-mesh-daemon (zero Python/OpenSSL ABI deps) if Cargo is present
+RUST_MESH_BIN=""
+export PATH="$HOME/.cargo/bin:$PATH"
+if [[ -f "$ROOT/Cargo.toml" ]] && command -v cargo >/dev/null 2>&1; then
+  echo "=== Building pure-Rust nodedeck-mesh-daemon ==="
+  if rustup target list --installed 2>/dev/null | grep -qx "x86_64-unknown-linux-musl"; then
+    if (cd "$ROOT" && cargo build --release --target x86_64-unknown-linux-musl -p nodedeck-mesh-daemon); then
+      RUST_MESH_BIN="$ROOT/target/x86_64-unknown-linux-musl/release/nodedeck-mesh-daemon"
+    fi
+  fi
+  if [[ -z "$RUST_MESH_BIN" ]]; then
+    (cd "$ROOT" && cargo build --release -p nodedeck-mesh-daemon)
+    RUST_MESH_BIN="$ROOT/target/release/nodedeck-mesh-daemon"
+  fi
+  install -m 0755 "$RUST_MESH_BIN" "$STAGE/opt/nodedeck/nodedeck-mesh-daemon"
+  strip --strip-unneeded "$STAGE/opt/nodedeck/nodedeck-mesh-daemon" 2>/dev/null || true
+  cp "$STAGE/opt/nodedeck/nodedeck-mesh-daemon" "$OUT_DIR/nodedeck-mesh-daemon-linux-${ARCH}"
+fi
+
+if [[ -x "$STAGE/opt/nodedeck/nodedeck-mesh-daemon" ]]; then
+  MESH_EXEC="/opt/nodedeck/nodedeck-mesh-daemon"
+else
+  MESH_EXEC="/usr/bin/python3 /opt/nodedeck/nodedeck_mesh_agent.py"
+fi
+
+cat > "$STAGE/usr/lib/systemd/user/nodedeck-mesh.service" <<EOF
 [Unit]
-Description=NodeDeck User-Space Built-in EasyTier Mesh Agent (Zero-Sudo)
+Description=NodeDeck User-Space Built-in EasyTier Mesh Daemon (Pure Rust, Zero-Sudo)
 After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 /opt/nodedeck/nodedeck_mesh_agent.py --state-dir %h/.config/nodedeck daemon
+ExecStart=${MESH_EXEC} --state-dir %h/.config/nodedeck daemon
 Restart=always
 RestartSec=3
 
@@ -150,9 +176,9 @@ fi
 if [[ -x "/usr/local/bin/easytier-cli" ]]; then
   install -m 0755 "/usr/local/bin/easytier-cli" "$STAGE/opt/nodedeck/easytier/easytier-cli"
 fi
-cat > "$STAGE/usr/local/bin/nodedeck-mesh" <<'EOF'
+cat > "$STAGE/usr/local/bin/nodedeck-mesh" <<EOF
 #!/usr/bin/env bash
-exec python3 /opt/nodedeck/nodedeck_mesh_agent.py "$@"
+exec ${MESH_EXEC} "\$@"
 EOF
 chmod 0755 "$STAGE/usr/local/bin/nodedeck-mesh"
 if [[ -f "$ROOT/linux/nodedeck.png" ]]; then
