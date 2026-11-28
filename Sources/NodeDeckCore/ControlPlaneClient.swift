@@ -579,11 +579,22 @@ public enum EmbeddedEasyTierManager {
 
     /// Expands seed URI(s) so UDP relay is tried first (avoiding TCP-over-TCP jitter on relay fallback)
     /// while keeping TCP as automatic fallback when UDP is firewalled.
+    /// If multiple explicit URIs are provided (e.g. separate UDP and TCP ports such as
+    /// `udp://host:25565,tcp://host:11010`), preserve them verbatim with UDP ordered first.
     public static func expandSeedUris(_ raw: String) -> [String] {
         let tokens = raw
             .components(separatedBy: CharacterSet(charactersIn: ", \t\n\r"))
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
+        if tokens.count > 1 {
+            let udps = tokens.filter { $0.hasPrefix("udp://") }
+            let others = tokens.filter { !$0.hasPrefix("udp://") }
+            var ordered: [String] = []
+            for uri in udps + others where !ordered.contains(uri) {
+                ordered.append(uri)
+            }
+            return ordered
+        }
         var ordered: [String] = []
         for uri in tokens {
             if uri.hasPrefix("tcp://") {

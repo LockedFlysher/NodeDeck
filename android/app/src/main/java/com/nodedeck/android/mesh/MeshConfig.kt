@@ -111,6 +111,11 @@ object MeshConfigCodec {
 
     fun expandSeedUris(raw: String): List<String> {
         val tokens = raw.split(Regex("[\\s,]+")).map { it.trim() }.filter { it.isNotEmpty() }
+        if (tokens.size > 1) {
+            val udps = tokens.filter { it.startsWith("udp://") }
+            val others = tokens.filter { !it.startsWith("udp://") }
+            return (udps + others).distinct()
+        }
         val ordered = mutableListOf<String>()
         for (uri in tokens) {
             when {

@@ -540,9 +540,19 @@ def api_request(
 
 
 def expand_seed_uris(raw_seed: str) -> list[str]:
-    """Ensure UDP relay is preferred before TCP fallback when hole-punching fails."""
+    """Ensure UDP relay is preferred before TCP fallback when hole-punching fails.
+    If multiple explicit URIs are configured (e.g. separate UDP/TCP ports), keep them
+    verbatim with UDP ordered first rather than synthesizing mismatched port pairs."""
     tokens = [tok.strip() for tok in re.split(r"[\s,]+", raw_seed or "") if tok.strip()]
-    ordered: list[str] = []
+    if len(tokens) > 1:
+        udps = [u for u in tokens if u.startswith("udp://")]
+        others = [u for u in tokens if not u.startswith("udp://")]
+        ordered: list[str] = []
+        for u in udps + others:
+            if u not in ordered:
+                ordered.append(u)
+        return ordered
+    ordered = []
     for uri in tokens:
         if uri.startswith("tcp://"):
             udp_uri = "udp://" + uri[len("tcp://"):]
@@ -762,6 +772,7 @@ def cmd_daemon(args: argparse.Namespace) -> int:
             sess["mesh"]["network_name"],
             sess["mesh"]["network_secret"],
             sess["device"]["virtual_cidr"],
+            sess["mesh"].get("seed_uri", ""),
         )
         write_runtime_toml(toml_file, sess, active_ips)
         print(
@@ -789,6 +800,7 @@ def cmd_daemon(args: argparse.Namespace) -> int:
                 latest["mesh"]["network_name"],
                 latest["mesh"]["network_secret"],
                 latest["device"]["virtual_cidr"],
+                latest["mesh"].get("seed_uri", ""),
             )
             if latest_key != active_net_key:
                 print("[nodedeck-mesh] account/mesh identity changed, restarting easytier-core", flush=True)
