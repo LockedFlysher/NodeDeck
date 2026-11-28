@@ -147,6 +147,9 @@ EOF
 if [[ -x "/usr/local/bin/easytier-core" ]]; then
   install -m 0755 "/usr/local/bin/easytier-core" "$STAGE/opt/nodedeck/easytier/easytier-core"
 fi
+if [[ -x "/usr/local/bin/easytier-cli" ]]; then
+  install -m 0755 "/usr/local/bin/easytier-cli" "$STAGE/opt/nodedeck/easytier/easytier-cli"
+fi
 cat > "$STAGE/usr/local/bin/nodedeck-mesh" <<'EOF'
 #!/usr/bin/env bash
 exec python3 /opt/nodedeck/nodedeck_mesh_agent.py "$@"

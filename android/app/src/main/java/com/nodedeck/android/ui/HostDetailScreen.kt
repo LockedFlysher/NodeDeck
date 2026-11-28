@@ -97,11 +97,16 @@ fun HostDetailScreen(
     val resolution by viewModel.streamResolution.collectAsState()
     val refreshRate by viewModel.streamRefreshRate.collectAsState()
     val accountSession by viewModel.accountSession.collectAsState()
+    val meshSnapshot by viewModel.meshSnapshot.collectAsState()
 
     val host = hosts.firstOrNull { it.id == hostId }
     if (host == null) {
         onBack()
         return
+    }
+    val peerLink = meshSnapshot.peers.firstOrNull {
+        it.virtualIpv4.equals(host.hostName, ignoreCase = true) ||
+            it.hostname.equals(host.alias, ignoreCase = true)
     }
     val snapshot = snapshots[host.id] ?: HostSnapshot(host = host)
     val sunshine = sunshineConfigs.firstOrNull {
@@ -127,7 +132,33 @@ fun HostDetailScreen(
                 },
                 title = {
                     Column {
-                        Text(host.alias, fontWeight = FontWeight.Bold)
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(host.alias, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            if (peerLink != null) {
+                                val badgeColor = when {
+                                    peerLink.isDirect -> NodeDeckColors.Online
+                                    peerLink.isTcpRelay -> NodeDeckColors.Offline
+                                    else -> NodeDeckColors.Warning
+                                }
+                                Surface(
+                                    shape = RoundedCornerShape(999.dp),
+                                    color = badgeColor.copy(alpha = 0.16f)
+                                ) {
+                                    Text(
+                                        text = peerLink.transportBadge(),
+                                        color = badgeColor,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1,
+                                        softWrap = false,
+                                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
+                                    )
+                                }
+                            }
+                        }
                         Text(
                             text = host.loginTarget,
                             style = MaterialTheme.typography.bodySmall,

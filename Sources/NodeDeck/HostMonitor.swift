@@ -83,6 +83,7 @@ final class HostMonitor: ObservableObject {
     // Unified Account & Built-in Mesh state
     @Published var accountSession: AccountSession = AccountSession()
     @Published var accountDevices: [ControlPlaneDevice] = []
+    @Published var meshPeerTransports: [MeshPeerTransport] = []
     @Published var isShowingAccountSheet = false
     let controlPlaneClient = ControlPlaneClient()
 
@@ -333,6 +334,21 @@ final class HostMonitor: ObservableObject {
         }.value
         vscodeRawEntries = loaded.entries
         isVSCodeInstalled = loaded.installed
+    }
+
+    func refreshMeshPeerTransports() async {
+        let peers = await Task.detached(priority: .utility) {
+            EmbeddedEasyTierManager.fetchLivePeerTransports()
+        }.value
+        meshPeerTransports = peers
+    }
+
+    func meshTransport(for host: SSHHost) -> MeshPeerTransport? {
+        EmbeddedEasyTierManager.matchPeerTransport(
+            peers: meshPeerTransports,
+            address: host.hostName,
+            alias: host.alias
+        )
     }
 
     func vscodeItems(for host: SSHHost) -> [VSCodeWorkspaceItem] {
@@ -774,6 +790,7 @@ final class HostMonitor: ObservableObject {
         refreshTask = Task {
             await refreshMountStatus()
             await refreshVSCodeWorkspaces()
+            await refreshMeshPeerTransports()
 
             await withTaskGroup(of: (String, HostProbeResult).self) { group in
                 for host in hostsToProbe {

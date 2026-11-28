@@ -151,6 +151,14 @@ private final class LimelightLifecycle: @unchecked Sendable {
 
 // MARK: - Stream Performance Snapshot
 
+enum StreamTransportKind: Equatable, Sendable {
+    case p2pUdp
+    case p2pTcp
+    case udpRelay
+    case tcpRelay
+    case direct
+}
+
 struct StreamPerformanceStats: Equatable, Sendable {
     var codec: String = "HEVC (Hardware)"
     var resolution: String = "1920×1080"
@@ -161,6 +169,7 @@ struct StreamPerformanceStats: Equatable, Sendable {
     var networkRttMs: Int = 0
     var networkJitterMs: Int = 0
     var transportRoute: String = "Direct"
+    var transportKind: StreamTransportKind = .direct
     var rendererStatus: String = "Ready"
 }
 
@@ -726,6 +735,8 @@ final class MoonlightStreamSession: ObservableObject {
     private var launchTask: Task<Void, Never>?
     private var activeGeneration: UInt64 = 0
     private var clipboardPollTask: Task<Void, Never>?
+    private var meshRoutePollTask: Task<Void, Never>?
+    private var liveMeshTransport: MeshPeerTransport?
     private var lastSyncedChangeCount: Int = NSPasteboard.general.changeCount
     private var lastSyncedText: String?
     private var lastRemoteText: String?
@@ -739,24 +750,66 @@ final class MoonlightStreamSession: ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 var enriched = newStats
-                enriched.transportRoute = Self.classifyTransportRoute(address: self.currentAddress)
+                let resolved = Self.resolveTransportRoute(
+                    address: self.currentAddress,
+                    mesh: self.liveMeshTransport
+                )
+                enriched.transportRoute = resolved.label
+                enriched.transportKind = resolved.kind
                 self.stats = enriched
             }
         }
     }
 
-    private static func classifyTransportRoute(address: String) -> String {
+    private static func resolveTransportRoute(
+        address: String,
+        mesh: MeshPeerTransport?
+    ) -> (label: String, kind: StreamTransportKind) {
+        if let mesh {
+            let kind: StreamTransportKind
+            if mesh.isP2P {
+                kind = mesh.tunnelProto.lowercased().contains("tcp") ? .p2pTcp : .p2pUdp
+            } else if mesh.isTcpRelay {
+                kind = .tcpRelay
+            } else {
+                kind = .udpRelay
+            }
+            return (mesh.shortBadge, kind)
+        }
         let addr = address.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if addr == "127.0.0.1" || addr == "::1" || addr == "localhost" {
-            return "Tunnel / Relay"
+            return ("SSH Tunnel", .tcpRelay)
+        }
+        if addr.hasPrefix("10.99.") {
+            return ("Mesh (Probing…)", .direct)
         }
         if addr.hasPrefix("100.") {
-            return "Mesh / Tailscale"
+            return ("Mesh / Tailscale", .direct)
         }
         if addr.hasPrefix("192.168.") || addr.hasPrefix("10.") || addr.hasPrefix("172.16.") || addr.hasPrefix("172.17.") || addr.hasPrefix("172.18.") || addr.hasPrefix("172.19.") || addr.hasPrefix("172.2") || addr.hasPrefix("172.30.") || addr.hasPrefix("172.31.") {
-            return "LAN / VPN Direct"
+            return ("LAN Direct", .direct)
         }
-        return "WAN Direct"
+        return ("WAN Direct", .direct)
+    }
+
+    private func startMeshRoutePolling() {
+        meshRoutePollTask?.cancel()
+        let addr = currentAddress
+        let alias = sshHostAlias
+        meshRoutePollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                let matched = await Task.detached(priority: .utility) {
+                    let peers = EmbeddedEasyTierManager.fetchLivePeerTransports()
+                    return EmbeddedEasyTierManager.matchPeerTransport(peers: peers, address: addr, alias: alias)
+                }.value
+                guard !Task.isCancelled, let self else { break }
+                self.liveMeshTransport = matched
+                let resolved = Self.resolveTransportRoute(address: self.currentAddress, mesh: matched)
+                self.stats.transportRoute = resolved.label
+                self.stats.transportKind = resolved.kind
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+            }
+        }
     }
 
     func start(
@@ -788,9 +841,18 @@ final class MoonlightStreamSession: ObservableObject {
             fps: fps
         )
         isPrivacyScreenEnabled = false
+        liveMeshTransport = nil
         streamTitle = hostAlias ?? address
-        stats = StreamPerformanceStats(codec: "Connecting…", resolution: "\(width)×\(height)", fps: 0)
+        let initialRoute = Self.resolveTransportRoute(address: address, mesh: nil)
+        stats = StreamPerformanceStats(
+            codec: "Connecting…",
+            resolution: "\(width)×\(height)",
+            fps: 0,
+            transportRoute: initialRoute.label,
+            transportKind: initialRoute.kind
+        )
         state = .connecting("Negotiating with Sunshine (\(address):\(httpPort))…")
+        startMeshRoutePolling()
 
         launchTask = Task { [weak self] in
             guard let self else { return }
@@ -1054,6 +1116,9 @@ final class MoonlightStreamSession: ObservableObject {
         launchTask = nil
         clipboardPollTask?.cancel()
         clipboardPollTask = nil
+        meshRoutePollTask?.cancel()
+        meshRoutePollTask = nil
+        liveMeshTransport = nil
         relativeMouseEnabled = false
 
         let launched = activeLaunchSession
@@ -1920,17 +1985,24 @@ private struct MoonlightStreamContentView: View {
                 )
                     .ignoresSafeArea()
 
-                // Optional pinned compact performance HUD
-                if session.showPerformanceHUD && session.state == .streaming {
+                // Top-of-stream live transport badge (always visible while streaming: P2P vs UDP/TCP Relay)
+                if session.state == .streaming {
                     VStack {
                         HStack {
-                            performanceHUDPill
+                            Spacer()
+                            if session.showPerformanceHUD {
+                                performanceHUDPill
+                                    .onTapGesture { session.showPerformanceHUD = false }
+                            } else {
+                                compactTransportTopBadge
+                                    .onTapGesture { session.showPerformanceHUD = true }
+                            }
                             Spacer()
                         }
                         Spacer()
                     }
-                    .padding(14)
-                    .allowsHitTesting(false)
+                    .padding(.top, 10)
+                    .padding(.horizontal, 14)
                 }
 
                 // Connection / Disconnection center overlay
@@ -2291,9 +2363,54 @@ private struct MoonlightStreamContentView: View {
         }
     }
 
+    private var transportBadgeColor: Color {
+        switch session.stats.transportKind {
+        case .p2pUdp: return .green
+        case .p2pTcp: return .teal
+        case .udpRelay: return .orange
+        case .tcpRelay: return .red
+        case .direct: return .green
+        }
+    }
+
+    private var compactTransportTopBadge: some View {
+        let isRelayWarn = session.stats.transportKind == .tcpRelay || session.stats.transportKind == .udpRelay
+        return HStack(spacing: 6) {
+            if session.stats.transportKind == .tcpRelay {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.red)
+            } else {
+                Circle().fill(transportBadgeColor).frame(width: 7, height: 7)
+            }
+            Text(session.stats.transportRoute)
+                .font(.system(size: 11, weight: .bold, design: .monospaced))
+                .foregroundStyle(isRelayWarn ? transportBadgeColor : .white)
+            if session.stats.networkRttMs > 0 {
+                Text("· \(session.stats.networkRttMs)ms")
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.85))
+            }
+            Text(String(format: "· %.1f Mbps", session.stats.bitrateMbps))
+                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.78))
+        }
+        .padding(.horizontal, 11)
+        .padding(.vertical, 5)
+        .background(Color.black.opacity(0.64), in: Capsule(style: .continuous))
+        .overlay(Capsule().stroke(transportBadgeColor.opacity(isRelayWarn ? 0.65 : 0.35), lineWidth: 1))
+        .help(l10n.t("点击展开/收起完整性能浮窗", "Click to expand/collapse full telemetry HUD"))
+    }
+
     private var performanceHUDPill: some View {
         HStack(spacing: 10) {
-            Circle().fill(statusColor).frame(width: 7, height: 7)
+            HStack(spacing: 5) {
+                Circle().fill(transportBadgeColor).frame(width: 7, height: 7)
+                Text(session.stats.transportRoute)
+                    .fontWeight(.bold)
+                    .foregroundStyle(transportBadgeColor)
+            }
+            Text("·")
             Text("\(session.stats.fps)/\(session.targetFPS) fps")
             Text("·")
             Text(String(format: "%.1f Mbps", session.stats.bitrateMbps))
@@ -2303,8 +2420,6 @@ private struct MoonlightStreamContentView: View {
                 Text("·")
                 Text("RTT \(session.stats.networkRttMs)ms")
             }
-            Text("·")
-            Text(session.stats.transportRoute)
             if session.stats.hostLatencyMs > 0 {
                 Text("·")
                 Text(String(format: "Enc %.1fms", session.stats.hostLatencyMs))
@@ -2314,8 +2429,8 @@ private struct MoonlightStreamContentView: View {
         .foregroundStyle(.white)
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
-        .background(Color.black.opacity(0.62), in: Capsule(style: .continuous))
-        .overlay(Capsule().stroke(Color.white.opacity(0.16), lineWidth: 1))
+        .background(Color.black.opacity(0.66), in: Capsule(style: .continuous))
+        .overlay(Capsule().stroke(transportBadgeColor.opacity(0.45), lineWidth: 1))
     }
 
     private var statusColor: Color {

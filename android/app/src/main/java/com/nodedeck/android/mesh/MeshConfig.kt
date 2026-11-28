@@ -38,7 +38,28 @@ data class MeshPeerStatus(
     val rxBytes: Long,
     val txBytes: Long,
     val proto: String
-)
+) {
+    val isTcpRelay: Boolean
+        get() = !isDirect && proto.lowercase().contains("tcp")
+
+    fun transportBadge(): String {
+        val p = proto.lowercase()
+        return if (isDirect) {
+            when {
+                p.contains("udp") -> "P2P · UDP"
+                p.contains("tcp") -> "P2P · TCP"
+                p.isNotBlank() && p != "p2p" -> "P2P · ${p.uppercase()}"
+                else -> "P2P"
+            }
+        } else {
+            when {
+                p.contains("udp") -> "UDP Relay"
+                p.contains("tcp") -> "TCP Relay"
+                else -> "Relay($cost)"
+            }
+        }
+    }
+}
 
 data class MeshRuntimeSnapshot(
     val state: MeshConnectionState = MeshConnectionState.STOPPED,
@@ -242,9 +263,15 @@ object MeshConfigCodec {
         val peerList = info.routes.map { r ->
             val p = peerById[r.peerId]
             val conn = p?.conns?.firstOrNull { !it.isClosed } ?: p?.conns?.firstOrNull()
+            val hopConn = if (r.nextHopPeerId != 0L && r.nextHopPeerId != r.peerId) {
+                peerById[r.nextHopPeerId]?.conns?.firstOrNull { !it.isClosed }
+                    ?: peerById[r.nextHopPeerId]?.conns?.firstOrNull()
+            } else null
             val direct = (r.nextHopPeerId != 0L && r.nextHopPeerId == r.peerId) || r.cost == 1L
             val latMs = conn?.stats?.latencyUs?.toLongOrNull()?.let { it / 1000.0 }
                 ?: (r.pathLatency.toDouble())
+            val rawProto = conn?.tunnel?.tunnelType?.substringBefore("://").orEmpty()
+                .ifBlank { hopConn?.tunnel?.tunnelType?.substringBefore("://").orEmpty() }
             MeshPeerStatus(
                 peerId = r.peerId,
                 hostname = r.hostname.ifBlank { "peer-${r.peerId}" },
@@ -252,10 +279,10 @@ object MeshConfigCodec {
                 isDirect = direct,
                 cost = r.cost,
                 latencyMs = latMs,
-                lossRate = conn?.lossRate ?: 0f,
+                lossRate = conn?.lossRate ?: hopConn?.lossRate ?: 0f,
                 rxBytes = conn?.stats?.rxBytes?.toLongOrNull() ?: 0L,
                 txBytes = conn?.stats?.txBytes?.toLongOrNull() ?: 0L,
-                proto = conn?.tunnel?.tunnelType?.substringBefore("://").orEmpty().ifBlank { if (direct) "p2p" else "relay" }
+                proto = rawProto.ifBlank { if (direct) "p2p" else "relay" }
             )
         }.sortedBy { it.virtualIpv4 }
 

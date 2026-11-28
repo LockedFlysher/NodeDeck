@@ -761,4 +761,222 @@ public enum EmbeddedEasyTierManager {
             throw ControlPlaneError.serverError(errText.trimmingCharacters(in: .whitespacesAndNewlines))
         }
     }
+
+    public static func resolveEasyTierCliBinary() -> String? {
+        var candidates: [String] = []
+        let bundleHelpers = Bundle.main.bundleURL
+            .appendingPathComponent("Contents/Helpers/easytier-cli").path
+        candidates.append(bundleHelpers)
+        candidates.append("/Applications/NodeDeck.app/Contents/Helpers/easytier-cli")
+        candidates.append("/usr/local/bin/easytier-cli")
+        candidates.append("/opt/homebrew/bin/easytier-cli")
+        for p in candidates where FileManager.default.isExecutableFile(atPath: p) {
+            return p
+        }
+        return nil
+    }
+
+    /// Queries local EasyTier daemon via `easytier-cli -o json peer` + `route` to resolve
+    /// the real transport mode (P2P UDP / P2P TCP / UDP Relay / TCP Relay) for every mesh peer.
+    public static func fetchLivePeerTransports() -> [MeshPeerTransport] {
+        guard let cli = resolveEasyTierCliBinary() else { return [] }
+        guard let peerData = runQuickCli(cli, args: ["-o", "json", "peer"]),
+              let peerArr = (try? JSONSerialization.jsonObject(with: peerData)) as? [[String: Any]] else {
+            return []
+        }
+
+        // Build hostname -> tunnel_proto map so relayed peers inherit their next-hop relay's protocol (udp vs tcp).
+        var protoByHost: [String: String] = [:]
+        var lossByHost: [String: Double] = [:]
+        for item in peerArr {
+            let h = (item["hostname"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let tp = (item["tunnel_proto"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if !h.isEmpty, !tp.isEmpty, tp != "-" {
+                protoByHost[h.lowercased()] = tp
+            }
+            if !h.isEmpty, let lossStr = item["loss_rate"] as? String {
+                let cleaned = lossStr.replacingOccurrences(of: "%", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+                if let val = Double(cleaned) {
+                    lossByHost[h.lowercased()] = val
+                }
+            }
+        }
+
+        var nextHopByIp: [String: String] = [:]
+        var nextHopByHost: [String: String] = [:]
+        if let routeData = runQuickCli(cli, args: ["-o", "json", "route"]),
+           let routeArr = (try? JSONSerialization.jsonObject(with: routeData)) as? [[String: Any]] {
+            for r in routeArr {
+                let ip = (r["ipv4"] as? String ?? "").components(separatedBy: "/").first ?? ""
+                let h = (r["hostname"] as? String ?? "").lowercased()
+                let nh = (r["next_hop_hostname"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                if !nh.isEmpty && nh != "DIRECT" && nh != "Local" {
+                    if !ip.isEmpty { nextHopByIp[ip] = nh }
+                    if !h.isEmpty { nextHopByHost[h] = nh }
+                }
+            }
+        }
+
+        var results: [MeshPeerTransport] = []
+        for item in peerArr {
+            let costRaw = (item["cost"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if costRaw.caseInsensitiveCompare("Local") == .orderedSame { continue }
+            let ip = (item["ipv4"] as? String ?? "").components(separatedBy: "/").first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let hostname = (item["hostname"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if ip.isEmpty && hostname.isEmpty { continue }
+
+            let isP2P = costRaw.lowercased() == "p2p"
+            var hopCount = isP2P ? 1 : 2
+            if !isP2P, let open = costRaw.firstIndex(of: "("), let close = costRaw.firstIndex(of: ")"), open < close {
+                let inner = String(costRaw[costRaw.index(after: open)..<close])
+                if let n = Int(inner) { hopCount = n }
+            }
+
+            var proto = (item["tunnel_proto"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if proto == "-" { proto = "" }
+            let relayVia = nextHopByIp[ip] ?? nextHopByHost[hostname.lowercased()] ?? ""
+            if !isP2P && proto.isEmpty {
+                if !relayVia.isEmpty, let hopProto = protoByHost[relayVia.lowercased()] {
+                    proto = hopProto
+                } else if let seedProto = protoByHost.first(where: { $0.key.contains("seed") || $0.key.contains("public") })?.value {
+                    proto = seedProto
+                }
+            }
+
+            let latMs: Double? = {
+                if let s = item["lat_ms"] as? String { return Double(s.trimmingCharacters(in: .whitespacesAndNewlines)) }
+                if let n = item["lat_ms"] as? Double { return n }
+                return nil
+            }()
+
+            var lossPct: Double? = {
+                if let s = item["loss_rate"] as? String {
+                    let cleaned = s.replacingOccurrences(of: "%", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+                    return Double(cleaned)
+                }
+                return nil
+            }()
+            if !isP2P && (lossPct == nil || lossPct == 0) {
+                if !relayVia.isEmpty, let hopLoss = lossByHost[relayVia.lowercased()], hopLoss > 0 {
+                    lossPct = hopLoss
+                }
+            }
+
+            results.append(MeshPeerTransport(
+                ipv4: ip,
+                hostname: hostname,
+                isP2P: isP2P,
+                hopCount: hopCount,
+                tunnelProto: proto,
+                relayVia: relayVia,
+                latencyMs: latMs,
+                lossRatePct: lossPct
+            ))
+        }
+        return results
+    }
+
+    public static func matchPeerTransport(
+        peers: [MeshPeerTransport],
+        address: String,
+        alias: String? = nil
+    ) -> MeshPeerTransport? {
+        let addr = address.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if !addr.isEmpty, let byIp = peers.first(where: { !$0.ipv4.isEmpty && $0.ipv4.lowercased() == addr }) {
+            return byIp
+        }
+        if let alias = alias?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !alias.isEmpty {
+            if let byHost = peers.first(where: { $0.hostname.lowercased() == alias }) {
+                return byHost
+            }
+        }
+        return nil
+    }
+
+    private static func runQuickCli(_ bin: String, args: [String]) -> Data? {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: bin)
+        proc.arguments = args
+        let outPipe = Pipe()
+        proc.standardOutput = outPipe
+        proc.standardError = FileHandle.nullDevice
+        do {
+            try proc.run()
+        } catch {
+            return nil
+        }
+        let deadline = Date().addingTimeInterval(1.5)
+        while proc.isRunning && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        if proc.isRunning {
+            proc.terminate()
+            return nil
+        }
+        guard proc.terminationStatus == 0 else { return nil }
+        return outPipe.fileHandleForReading.readDataToEndOfFile()
+    }
+}
+
+public struct MeshPeerTransport: Equatable, Sendable {
+    public let ipv4: String
+    public let hostname: String
+    public let isP2P: Bool
+    public let hopCount: Int
+    public let tunnelProto: String
+    public let relayVia: String
+    public let latencyMs: Double?
+    public let lossRatePct: Double?
+
+    public init(
+        ipv4: String,
+        hostname: String,
+        isP2P: Bool,
+        hopCount: Int,
+        tunnelProto: String,
+        relayVia: String = "",
+        latencyMs: Double? = nil,
+        lossRatePct: Double? = nil
+    ) {
+        self.ipv4 = ipv4
+        self.hostname = hostname
+        self.isP2P = isP2P
+        self.hopCount = hopCount
+        self.tunnelProto = tunnelProto
+        self.relayVia = relayVia
+        self.latencyMs = latencyMs
+        self.lossRatePct = lossRatePct
+    }
+
+    public var isTcpRelay: Bool {
+        !isP2P && tunnelProto.lowercased().contains("tcp")
+    }
+
+    public var isUdpRelay: Bool {
+        !isP2P && tunnelProto.lowercased().contains("udp")
+    }
+
+    public var shortBadge: String {
+        let p = tunnelProto.lowercased()
+        if isP2P {
+            if p.contains("udp") { return "P2P · UDP" }
+            if p.contains("tcp") { return "P2P · TCP" }
+            if !p.isEmpty { return "P2P · \(p.uppercased())" }
+            return "P2P"
+        }
+        if p.contains("udp") { return "UDP Relay" }
+        if p.contains("tcp") { return "TCP Relay" }
+        return "Relay(\(hopCount))"
+    }
+
+    public var detailedBadge: String {
+        var parts = [shortBadge]
+        if let lat = latencyMs, lat > 0 {
+            parts.append("\(Int(lat.rounded()))ms")
+        }
+        if let loss = lossRatePct, loss >= 5.0 {
+            parts.append("loss \(Int(loss.rounded()))%")
+        }
+        return parts.joined(separator: " · ")
+    }
 }

@@ -529,10 +529,15 @@ private fun MeshPeerItem(peer: MeshPeerStatus) {
         Column(modifier = Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(peer.hostname, style = MaterialTheme.typography.titleSmall)
+                val badgeTint = when {
+                    peer.isDirect -> NodeDeckColors.Online
+                    peer.isTcpRelay -> NodeDeckColors.Offline
+                    else -> NodeDeckColors.Warning
+                }
                 BadgeChip(
-                    text = if (peer.isDirect) "p2p" else "relay(${peer.cost})",
-                    containerColor = if (peer.isDirect) NodeDeckColors.Online.copy(alpha = 0.18f) else MaterialTheme.colorScheme.surfaceVariant,
-                    contentColor = if (peer.isDirect) NodeDeckColors.Online else MaterialTheme.colorScheme.onSurfaceVariant
+                    text = peer.transportBadge(),
+                    containerColor = badgeTint.copy(alpha = 0.18f),
+                    contentColor = badgeTint
                 )
             }
             Text(

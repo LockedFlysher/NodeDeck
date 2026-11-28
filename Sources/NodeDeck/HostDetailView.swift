@@ -228,7 +228,11 @@ struct HostDetailView: View {
 
                 FlowLayout(spacing: 8, lineSpacing: 6) {
                     StatusBadge(state: snapshot.state)
-                    RouteBadge(route: snapshot.host.routeKind)
+                    if let mesh = store.meshTransport(for: snapshot.host) {
+                        meshTransportPill(mesh)
+                    } else {
+                        RouteBadge(route: snapshot.host.routeKind)
+                    }
                     if let latency = snapshot.latencyMilliseconds, snapshot.state == .online {
                         Label(DisplayFormat.latency(latency), systemImage: "bolt.horizontal")
                             .font(.caption)
@@ -241,6 +245,34 @@ struct HostDetailView: View {
                 }
             }
         }
+    }
+
+    @ViewBuilder
+    private func meshTransportPill(_ mesh: MeshPeerTransport) -> some View {
+        let tint: Color = mesh.isP2P
+            ? (mesh.tunnelProto.contains("tcp") ? .teal : .green)
+            : (mesh.isTcpRelay ? .red : .orange)
+        let icon = mesh.isP2P ? "arrow.left.arrow.right.circle.fill" : (mesh.isTcpRelay ? "exclamationmark.triangle.fill" : "arrow.triangle.2.circlepath.circle.fill")
+        let tip: String = mesh.isP2P
+            ? l10n.t("EasyTier 点对点直连 (\(mesh.detailedBadge))", "EasyTier P2P Direct (\(mesh.detailedBadge))")
+            : l10n.t(
+                "当前经由中继转发 (\(mesh.detailedBadge)\(mesh.relayVia.isEmpty ? "" : " · via \(mesh.relayVia)"))。若卡顿或码率低，请在云端防火墙放行 UDP 11010 或将 EasyTier 加入代理直连以恢复 P2P。",
+                "Traffic is relayed (\(mesh.detailedBadge)\(mesh.relayVia.isEmpty ? "" : " · via \(mesh.relayVia)")). Open UDP 11010 on your seed server or bypass local proxy for EasyTier to restore P2P."
+            )
+        HStack(spacing: 4) {
+            Image(systemName: icon)
+                .font(.system(size: 10, weight: .semibold))
+            Text(mesh.detailedBadge)
+                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+        }
+        .foregroundStyle(tint)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
+        .background(Capsule(style: .continuous).fill(tint.opacity(0.14)))
+        .overlay(Capsule(style: .continuous).stroke(tint.opacity(0.35), lineWidth: 1))
+        .lineLimit(1)
+        .fixedSize(horizontal: true, vertical: false)
+        .help(tip)
     }
 
     @ViewBuilder

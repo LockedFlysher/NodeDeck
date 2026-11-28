@@ -605,6 +605,7 @@ int main(int argc, char **argv) {
     const char *gfever = "3.23.0.74";
     const char *rtsp = NULL;
     const char *rikey_hex = NULL;
+    const char *route_label = NULL;
     uint32_t rikeyid = 1;
     int width = 1920, height = 1080, fps = 60, bitrate = 20000, codec_support = 0;
 
@@ -621,6 +622,7 @@ int main(int argc, char **argv) {
         else if (strcmp(argv[i], "--bitrate") == 0) bitrate = atoi(argv[i + 1]);
         else if (strcmp(argv[i], "--codec-support") == 0) codec_support = atoi(argv[i + 1]);
         else if (strcmp(argv[i], "--hwaccel") == 0) snprintf(g_hwaccel_pref, sizeof(g_hwaccel_pref), "%s", argv[i + 1]);
+        else if (strcmp(argv[i], "--route") == 0) route_label = argv[i + 1];
     }
 
     if (!host || !rtsp || !rikey_hex) {
@@ -778,7 +780,11 @@ int main(int argc, char **argv) {
                     if (combo && ev.key.keysym.scancode == SDL_SCANCODE_S) {
                         g_show_stats_title = !g_show_stats_title;
                         if (!g_show_stats_title) {
-                            snprintf(title, sizeof(title), "NodeDeck Remote Desktop — %s", host);
+                            if (route_label && route_label[0]) {
+                                snprintf(title, sizeof(title), "NodeDeck Remote Desktop — %s [%s]", host, route_label);
+                            } else {
+                                snprintf(title, sizeof(title), "NodeDeck Remote Desktop — %s", host);
+                            }
                             SDL_SetWindowTitle(g_window, title);
                         }
                         continue;
@@ -841,12 +847,21 @@ int main(int argc, char **argv) {
             int measured_fps = (int)(frames / sec + 0.5);
             double mbps = ((double)bytes * 8.0) / (sec * 1000000.0);
 
-            snprintf(
-                title, sizeof(title),
-                "NodeDeck — %s [%s %dx%d @ %dfps | %.1f Mbps | %ums | %s] (Ctrl+Alt+Shift+M/F/Q)",
-                host, g_decoder_backend, vw, vh, measured_fps, mbps, rtt,
-                g_relative_mouse ? "RelMouse" : "AbsMouse"
-            );
+            if (route_label && route_label[0]) {
+                snprintf(
+                    title, sizeof(title),
+                    "NodeDeck — %s [%s | %s %dx%d @ %dfps | %.1f Mbps | %ums | %s] (Ctrl+Alt+Shift+M/F/Q)",
+                    host, route_label, g_decoder_backend, vw, vh, measured_fps, mbps, rtt,
+                    g_relative_mouse ? "RelMouse" : "AbsMouse"
+                );
+            } else {
+                snprintf(
+                    title, sizeof(title),
+                    "NodeDeck — %s [%s %dx%d @ %dfps | %.1f Mbps | %ums | %s] (Ctrl+Alt+Shift+M/F/Q)",
+                    host, g_decoder_backend, vw, vh, measured_fps, mbps, rtt,
+                    g_relative_mouse ? "RelMouse" : "AbsMouse"
+                );
+            }
             SDL_SetWindowTitle(g_window, title);
             last_stats_tick = now;
         }

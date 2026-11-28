@@ -123,6 +123,7 @@ import com.nodedeck.android.core.SSHHost
 import com.nodedeck.android.core.StreamQualityMath
 import com.nodedeck.android.core.StreamRefreshRate
 import com.nodedeck.android.core.StreamResolutionPreset
+import com.nodedeck.android.mesh.MeshRuntimeController
 import com.nodedeck.android.ui.theme.NodeDeckColors
 import com.nodedeck.android.ui.theme.NodeDeckTheme
 import kotlinx.coroutines.delay
@@ -288,6 +289,8 @@ class StreamActivity : ComponentActivity() {
             NodeDeckTheme(darkTheme = true) {
                 StreamScreen(
                     session = session,
+                    targetAddress = launchAddress,
+                    targetAlias = launchHost?.alias.orEmpty(),
                     orientationMode = orientationModeState.value,
                     onSelectOrientation = { mode ->
                         orientationModeState.value = mode
@@ -729,6 +732,8 @@ private class StreamTouchInputController(
 @Composable
 private fun StreamScreen(
     session: StreamSession,
+    targetAddress: String,
+    targetAlias: String,
     orientationMode: StreamOrientationMode,
     onSelectOrientation: (StreamOrientationMode) -> Unit,
     onReconnect: () -> Unit,
@@ -742,6 +747,30 @@ private fun StreamScreen(
     val targetFps by session.targetFps.collectAsState()
     val title by session.streamTitle.collectAsState()
     val showHud by session.showHud.collectAsState()
+    val meshSnapshot by MeshRuntimeController.snapshot.collectAsState()
+    val peerLink = remember(meshSnapshot.peers, targetAddress, targetAlias) {
+        meshSnapshot.peers.firstOrNull {
+            (targetAddress.isNotBlank() && it.virtualIpv4.equals(targetAddress, ignoreCase = true)) ||
+                (targetAlias.isNotBlank() && it.hostname.equals(targetAlias, ignoreCase = true))
+        }
+    }
+    val routeBadgeText = remember(peerLink, targetAddress) {
+        when {
+            peerLink != null -> peerLink.transportBadge()
+            targetAddress == "127.0.0.1" || targetAddress == "localhost" -> "SSH Tunnel"
+            targetAddress.startsWith("10.99.") -> "Mesh"
+            targetAddress.startsWith("192.168.") || targetAddress.startsWith("10.") -> "LAN Direct"
+            else -> "WAN Direct"
+        }
+    }
+    val routeBadgeColor = remember(peerLink, targetAddress) {
+        when {
+            peerLink == null -> Color(0xFF8FB4CE)
+            peerLink.isDirect -> NodeDeckColors.Online
+            peerLink.isTcpRelay -> NodeDeckColors.Offline
+            else -> NodeDeckColors.Warning
+        }
+    }
     val touchpadMode by session.touchpadMode.collectAsState()
     val privacyEnabled by session.privacyScreenEnabled.collectAsState()
     val clipboardStatus by session.clipboardStatus.collectAsState()
@@ -916,8 +945,8 @@ private fun StreamScreen(
             }
         )
 
-        // 3. Pinned Telemetry HUD (color-coded latency, tap to hide)
-        if (showHud && state is StreamConnectionState.Streaming) {
+        // 3. Top-of-screen Transport & Telemetry HUD (always shows P2P vs UDP/TCP Relay at top; tap to expand/collapse full stats)
+        if (state is StreamConnectionState.Streaming) {
             val rttColor = when {
                 stats.networkRttMs <= 35 -> NodeDeckColors.Online
                 stats.networkRttMs <= 80 -> NodeDeckColors.Warning
@@ -925,33 +954,58 @@ private fun StreamScreen(
             }
             Surface(
                 modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .padding(14.dp)
-                    .clickable { session.setShowHud(false) },
-                shape = RoundedCornerShape(10.dp),
+                    .align(Alignment.TopCenter)
+                    .padding(top = 10.dp, start = 14.dp, end = 14.dp)
+                    .border(
+                        width = 1.dp,
+                        color = routeBadgeColor.copy(alpha = if (peerLink != null && !peerLink.isDirect) 0.65f else 0.35f),
+                        shape = RoundedCornerShape(999.dp)
+                    )
+                    .clickable { session.setShowHud(!showHud) },
+                shape = RoundedCornerShape(999.dp),
                 color = Color(0xBB0D1218)
             ) {
                 Row(
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.padding(horizontal = 11.dp, vertical = 5.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    Box(
+                        modifier = Modifier
+                            .size(7.dp)
+                            .clip(CircleShape)
+                            .background(routeBadgeColor)
+                    )
                     Text(
-                        text = "${stats.fps}/${targetFps} FPS",
-                        color = NodeDeckColors.Online,
+                        text = routeBadgeText,
+                        color = routeBadgeColor,
                         style = MaterialTheme.typography.labelSmall,
                         fontWeight = FontWeight.Bold
                     )
-                    Text(
-                        text = String.format("%.1f Mbps", stats.bitrateMbps),
-                        color = Color.White,
-                        style = MaterialTheme.typography.labelSmall
-                    )
-                    Text(
-                        text = "${stats.resolution} · ${stats.codec.substringBefore(" ")}",
-                        color = Color(0xFFB8C7D4),
-                        style = MaterialTheme.typography.labelSmall
-                    )
+                    if (showHud) {
+                        Text(
+                            text = "${stats.fps}/${targetFps} FPS",
+                            color = NodeDeckColors.Online,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = String.format("%.1f Mbps", stats.bitrateMbps),
+                            color = Color.White,
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                        Text(
+                            text = "${stats.resolution} · ${stats.codec.substringBefore(" ")}",
+                            color = Color(0xFFB8C7D4),
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                    } else {
+                        Text(
+                            text = String.format("%.1f Mbps", stats.bitrateMbps),
+                            color = Color(0xFFD6E2EC),
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                    }
                     Text(
                         text = "RTT ${stats.networkRttMs}ms",
                         color = rttColor,
@@ -1270,7 +1324,7 @@ private fun StreamScreen(
                                     )
                                 }
                                 Text(
-                                    text = "${stats.fps}/${targetFps} FPS · ${String.format("%.1f", stats.bitrateMbps)} Mbps · ${stats.networkRttMs}ms",
+                                    text = "$routeBadgeText · ${stats.fps}/${targetFps} FPS · ${String.format("%.1f", stats.bitrateMbps)} Mbps · ${stats.networkRttMs}ms",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = Color(0xFF9EB3C2),
                                     maxLines = 1

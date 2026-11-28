@@ -443,6 +443,165 @@ def detect_local_gpu_summary() -> tuple[list[str], list[str], str]:
     return gpus, render_nodes, sess
 
 
+def resolve_easytier_cli() -> str:
+    candidates = [
+        "/opt/nodedeck/easytier/easytier-cli",
+        str(Path.home() / ".local" / "share" / "nodedeck" / "easytier" / "easytier-cli"),
+        "/usr/local/bin/easytier-cli",
+        shutil.which("easytier-cli") or "",
+    ]
+    for p in candidates:
+        if p and os.path.isfile(p) and os.access(p, os.X_OK):
+            return p
+    return ""
+
+
+def fetch_easytier_peer_transports() -> list[dict]:
+    cli = resolve_easytier_cli()
+    if not cli:
+        return []
+    try:
+        pr = subprocess.run([cli, "-o", "json", "peer"], capture_output=True, text=True, timeout=1.5)
+        if pr.returncode != 0 or not pr.stdout.strip():
+            return []
+        peers = json.loads(pr.stdout)
+        if not isinstance(peers, list):
+            return []
+    except Exception:
+        return []
+
+    proto_by_host: dict[str, str] = {}
+    loss_by_host: dict[str, float] = {}
+    for item in peers:
+        if not isinstance(item, dict):
+            continue
+        h = str(item.get("hostname") or "").strip().lower()
+        tp = str(item.get("tunnel_proto") or "").strip().lower()
+        if h and tp and tp != "-":
+            proto_by_host[h] = tp
+        ls = str(item.get("loss_rate") or "").replace("%", "").strip()
+        try:
+            if h and ls and ls != "-":
+                loss_by_host[h] = float(ls)
+        except ValueError:
+            pass
+
+    next_hop_by_ip: dict[str, str] = {}
+    next_hop_by_host: dict[str, str] = {}
+    try:
+        rr = subprocess.run([cli, "-o", "json", "route"], capture_output=True, text=True, timeout=1.5)
+        if rr.returncode == 0 and rr.stdout.strip():
+            routes = json.loads(rr.stdout)
+            if isinstance(routes, list):
+                for r in routes:
+                    if not isinstance(r, dict):
+                        continue
+                    ip = str(r.get("ipv4") or "").split("/", 1)[0].strip()
+                    h = str(r.get("hostname") or "").strip().lower()
+                    nh = str(r.get("next_hop_hostname") or "").strip()
+                    if nh and nh not in ("DIRECT", "Local"):
+                        if ip:
+                            next_hop_by_ip[ip] = nh
+                        if h:
+                            next_hop_by_host[h] = nh
+    except Exception:
+        pass
+
+    out: list[dict] = []
+    for item in peers:
+        if not isinstance(item, dict):
+            continue
+        cost_raw = str(item.get("cost") or "").strip()
+        if cost_raw.lower() == "local":
+            continue
+        ip = str(item.get("ipv4") or "").split("/", 1)[0].strip()
+        hostname = str(item.get("hostname") or "").strip()
+        if not ip and not hostname:
+            continue
+        is_p2p = cost_raw.lower() == "p2p"
+        hop = 1 if is_p2p else 2
+        m_hop = re.search(r"\((\d+)\)", cost_raw)
+        if m_hop:
+            hop = int(m_hop.group(1))
+        proto = str(item.get("tunnel_proto") or "").strip().lower()
+        if proto == "-":
+            proto = ""
+        relay_via = next_hop_by_ip.get(ip) or next_hop_by_host.get(hostname.lower()) or ""
+        if not is_p2p and not proto:
+            if relay_via and relay_via.lower() in proto_by_host:
+                proto = proto_by_host[relay_via.lower()]
+            else:
+                for k, v in proto_by_host.items():
+                    if "seed" in k or "public" in k:
+                        proto = v
+                        break
+        lat_ms = None
+        try:
+            ls = str(item.get("lat_ms") or "").strip()
+            if ls and ls != "-":
+                lat_ms = float(ls)
+        except ValueError:
+            pass
+        loss_pct = None
+        try:
+            lr = str(item.get("loss_rate") or "").replace("%", "").strip()
+            if lr and lr != "-":
+                loss_pct = float(lr)
+        except ValueError:
+            pass
+        if not is_p2p and (not loss_pct) and relay_via and loss_by_host.get(relay_via.lower(), 0.0) > 0:
+            loss_pct = loss_by_host[relay_via.lower()]
+
+        if is_p2p:
+            if "udp" in proto:
+                badge = "P2P · UDP"
+            elif "tcp" in proto:
+                badge = "P2P · TCP"
+            elif proto:
+                badge = f"P2P · {proto.upper()}"
+            else:
+                badge = "P2P"
+        else:
+            if "udp" in proto:
+                badge = "UDP Relay"
+            elif "tcp" in proto:
+                badge = "TCP Relay"
+            else:
+                badge = f"Relay({hop})"
+        detail_parts = [badge]
+        if lat_ms and lat_ms > 0:
+            detail_parts.append(f"{int(round(lat_ms))}ms")
+        if loss_pct and loss_pct >= 5.0:
+            detail_parts.append(f"loss {int(round(loss_pct))}%")
+        out.append({
+            "ipv4": ip,
+            "hostname": hostname,
+            "is_p2p": is_p2p,
+            "is_tcp_relay": (not is_p2p) and ("tcp" in proto),
+            "proto": proto,
+            "relay_via": relay_via,
+            "lat_ms": lat_ms,
+            "loss_pct": loss_pct,
+            "badge": badge,
+            "detailed": " · ".join(detail_parts),
+        })
+    return out
+
+
+def match_easytier_transport(peers: list[dict], address: str, alias: str = "") -> dict | None:
+    addr = (address or "").strip().lower()
+    al = (alias or "").strip().lower()
+    if addr:
+        for p in peers:
+            if p.get("ipv4", "").lower() == addr:
+                return p
+    if al:
+        for p in peers:
+            if p.get("hostname", "").lower() == al:
+                return p
+    return None
+
+
 def is_local_host_running() -> bool:
     try:
         r = subprocess.run(
@@ -1404,6 +1563,7 @@ class NodeDeckWindow(Gtk.Window):
         self.filter_mode = "all"
         self.lang = self.settings.get("language") or detect_default_lang()
         self.metrics_cache = {}
+        self.mesh_transports = []
         saved_res = self.settings.get("stream_resolution", "1920x1080")
         if saved_res not in ("1920x1080", "2560x1440", "3840x2160"):
             saved_res = "1920x1080"
@@ -2524,7 +2684,19 @@ class NodeDeckWindow(Gtk.Window):
         subprocess.Popen([code_bin, "--remote", f"ssh-remote+{host['alias']}"])
         self.status_label.set_text(self.t(f"正在通过 VS Code 打开 {host['alias']}…", f"Opening {host['alias']} in VS Code…"))
 
+    def refresh_mesh_transports_async(self):
+        def _bg():
+            peers = fetch_easytier_peer_transports()
+            def _apply():
+                changed = peers != self.mesh_transports
+                self.mesh_transports = peers
+                if changed and self.selected_host:
+                    self.render_detail()
+            GLib.idle_add(_apply)
+        threading.Thread(target=_bg, daemon=True).start()
+
     def refresh_all_metrics_async(self):
+        self.refresh_mesh_transports_async()
         for h in list(self.hosts):
             self.refresh_metrics_async(h["alias"])
 
@@ -2751,7 +2923,25 @@ class NodeDeckWindow(Gtk.Window):
             badges_row.pack_start(_make_badge(self.t("● 离线", "● Offline"), "nd-badge-offline"), False, False, 0)
         else:
             badges_row.pack_start(_make_badge(self.t("● 在线", "● Online"), "nd-badge-online"), False, False, 0)
-        if _is_lan_or_mesh_host(h["hostname"]):
+        mesh_info = match_easytier_transport(self.mesh_transports, h["hostname"], alias)
+        if mesh_info:
+            if mesh_info["is_p2p"]:
+                m_cls = "nd-badge-lan" if "tcp" in mesh_info.get("proto", "") else "nd-badge-online"
+                m_lbl = _make_badge(mesh_info["detailed"], m_cls)
+                m_lbl.set_tooltip_text(self.t("EasyTier 点对点直连", "EasyTier P2P Direct"))
+            else:
+                m_cls = "nd-badge-offline" if mesh_info.get("is_tcp_relay") else "nd-badge-checking"
+                m_lbl = _make_badge(
+                    ("⚠ " if mesh_info.get("is_tcp_relay") else "") + mesh_info["detailed"],
+                    m_cls,
+                )
+                via_txt = f" (via {mesh_info['relay_via']})" if mesh_info.get("relay_via") else ""
+                m_lbl.set_tooltip_text(self.t(
+                    f"当前经由中继转发{via_txt}。若码率低或延迟高，请在云端防火墙放行 UDP 11010 或将 EasyTier 加入代理直连以恢复 P2P。",
+                    f"Relayed{via_txt}. Open UDP 11010 on seed server or bypass local proxy for EasyTier to restore P2P.",
+                ))
+            badges_row.pack_start(m_lbl, False, False, 0)
+        elif _is_lan_or_mesh_host(h["hostname"]):
             badges_row.pack_start(_make_badge("Mesh / LAN", "nd-badge-lan"), False, False, 0)
         else:
             badges_row.pack_start(_make_badge("WAN", "nd-badge-wan"), False, False, 0)
@@ -3674,6 +3864,10 @@ print(f"OK:{{detected_port}}")
                 raise RuntimeError(f"Sunshine HTTP {sc}: {sm or 'Failed to start streaming session'}")
 
             stream_bin = resolve_stream_bin()
+            live_peers = fetch_easytier_peer_transports()
+            host_alias = str(saved.get("hostAlias") or saved.get("serverName") or "")
+            matched_route = match_easytier_transport(live_peers or self.mesh_transports, addr, host_alias)
+            route_badge = matched_route["badge"] if matched_route else ("LAN Direct" if _is_lan_or_mesh_host(addr) else "WAN Direct")
             CONF_DIR.mkdir(parents=True, exist_ok=True)
             log_path = CONF_DIR / "stream-last.log"
             log_fh = open(log_path, "w", encoding="utf-8")
@@ -3685,12 +3879,13 @@ print(f"OK:{{detected_port}}")
                     "--bitrate", str(bitrate_kbps),
                     "--codec-support", codec_support,
                     "--hwaccel", self.stream_hwaccel,
+                    "--route", route_badge,
                 ],
                 stdout=log_fh,
                 stderr=log_fh,
             )
             log_fh.close()
-            GLib.idle_add(self.status_label.set_text, f"Streaming {addr} ({mode_str}, {bitrate_kbps // 1000} Mbps, hwaccel={self.stream_hwaccel})")
+            GLib.idle_add(self.status_label.set_text, f"Streaming {addr} [{route_badge}] ({mode_str}, {bitrate_kbps // 1000} Mbps, hwaccel={self.stream_hwaccel})")
 
             # Watch for immediate crash/exit without blocking long-running streams on a pipe buffer
             time.sleep(2.5)
