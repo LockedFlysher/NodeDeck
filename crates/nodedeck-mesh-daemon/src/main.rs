@@ -77,8 +77,18 @@ fn runtime_toml_file(state_dir: &Path) -> PathBuf {
 }
 
 fn load_session(state_dir: &Path) -> Option<AccountSession> {
-    let raw = fs::read_to_string(session_file(state_dir)).ok()?;
-    serde_json::from_str(&raw).ok()
+    let path = session_file(state_dir);
+    let raw = fs::read_to_string(&path).ok()?;
+    match serde_json::from_str::<AccountSession>(&raw) {
+        Ok(s) => Some(s),
+        Err(err) => {
+            eprintln!(
+                "[nodedeck-mesh-daemon] failed to parse {}: {err}",
+                path.display()
+            );
+            None
+        }
+    }
 }
 
 fn save_session(state_dir: &Path, session: &AccountSession) -> Result<()> {
