@@ -138,7 +138,7 @@ impl ControlPlaneClient {
             "cert_pem": cert_pem,
         });
         let _: Value = self
-            .post_json(server_url, "/api/v1/client-certs", &payload, Some(token))
+            .post_json(server_url, "/api/v1/certs/register", &payload, Some(token))
             .await?;
         Ok(())
     }
@@ -155,7 +155,7 @@ impl ControlPlaneClient {
             "public_key": public_key,
         });
         let _: Value = self
-            .post_json(server_url, "/api/v1/ssh-keys", &payload, Some(token))
+            .post_json(server_url, "/api/v1/ssh-keys/register", &payload, Some(token))
             .await?;
         Ok(())
     }
