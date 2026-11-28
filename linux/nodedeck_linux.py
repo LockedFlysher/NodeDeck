@@ -10,6 +10,7 @@ import random
 import re
 import secrets
 import select
+import shutil
 import socket
 import ssl
 import subprocess
