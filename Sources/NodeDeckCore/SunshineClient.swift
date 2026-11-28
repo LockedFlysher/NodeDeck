@@ -173,6 +173,7 @@ public final class SunshineClient: @unchecked Sendable {
         let identity = try loadPKCS12Identity(data: p12Data, password: p12Password)
         let delegate = SunshineTLSDelegate(identity: identity)
         let config = URLSessionConfiguration.ephemeral
+        config.connectionProxyDictionary = [:]
         config.timeoutIntervalForRequest = 12
         config.timeoutIntervalForResource = 30
         let session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
@@ -272,35 +273,66 @@ public final class SunshineClient: @unchecked Sendable {
 
         let rikey = Self.randomBytes(count: 16)
         let rikeyId = Int32.random(in: 1...Int32.max)
-        let actionPath = (info.currentGame == app.id && info.currentGame != 0) ? "/resume" : "/launch"
+        // Always cancel any stale/busy session (e.g. left open by another client or old resolution)
+        // before calling /launch so Sunshine honors the requested width/height/fps cleanly.
+        if info.currentGame != 0 {
+            _ = try? await requestXML(
+                session: session,
+                scheme: "https",
+                address: address,
+                port: info.httpsPort,
+                path: "/cancel",
+                query: [
+                    "uniqueid": uniqueId,
+                    "uuid": UUID().uuidString.replacingOccurrences(of: "-", with: "")
+                ],
+                timeout: 6
+            )
+            try? await Task.sleep(nanoseconds: 350_000_000)
+        }
 
-        let xml = try await requestXML(
+        let query: [String: String] = [
+            "uniqueid": uniqueId,
+            "uuid": UUID().uuidString.replacingOccurrences(of: "-", with: ""),
+            "appid": String(app.id),
+            "mode": "\(width)x\(height)x\(fps)",
+            "additionalStates": "1",
+            "sops": "0",
+            "rikey": Self.toHex(rikey),
+            "rikeyid": String(rikeyId),
+            "localAudioPlayMode": "0",
+            "surroundAudioInfo": "196610",
+            "remoteControllersBitmap": "0",
+            "gcmap": "0",
+            "gcpersist": "0"
+        ]
+
+        var xml = try await requestXML(
             session: session,
             scheme: "https",
             address: address,
             port: info.httpsPort,
-            path: actionPath,
-            query: [
-                "uniqueid": uniqueId,
-                "uuid": UUID().uuidString.replacingOccurrences(of: "-", with: ""),
-                "appid": String(app.id),
-                "mode": "\(width)x\(height)x\(fps)",
-                "additionalStates": "1",
-                "sops": "0",
-                "rikey": Self.toHex(rikey),
-                "rikeyid": String(rikeyId),
-                "localAudioPlayMode": "0",
-                "surroundAudioInfo": "196610",
-                "remoteControllersBitmap": "0",
-                "gcmap": "0",
-                "gcpersist": "0"
-            ],
+            path: "/launch",
+            query: query,
             timeout: 20
         )
 
-        let root = SimpleXMLParser.parse(xml)
+        var root = SimpleXMLParser.parse(xml)
+        var launched = root.firstText("gamesession") == "1" || root.firstText("resume") == "1" || root.firstText("sessionUrl0") != nil
+        if !launched {
+            xml = try await requestXML(
+                session: session,
+                scheme: "https",
+                address: address,
+                port: info.httpsPort,
+                path: "/resume",
+                query: query,
+                timeout: 20
+            )
+            root = SimpleXMLParser.parse(xml)
+            launched = root.firstText("gamesession") == "1" || root.firstText("resume") == "1" || root.firstText("sessionUrl0") != nil
+        }
         let sessionURL = root.firstText("sessionUrl0") ?? "rtsp://\(address):48010"
-        let launched = root.firstText("gamesession") == "1" || root.firstText("resume") == "1" || root.firstText("sessionUrl0") != nil
         guard launched else {
             let msg = root.attributes["status_message"] ?? "Sunshine declined stream launch."
             throw SunshineError.launchFailed(msg)
