@@ -152,8 +152,16 @@ def detect_sunshine_config(target_user: str) -> tuple[bool, int, int, Path | Non
 def ensure_default_sunshine_config(target_user: str) -> tuple[bool, int, int, Path | None, Path | None]:
     """Ensure a brand-new Linux host initializes default nodedeck-host config on account sign-in (zero sudo)."""
     enabled, hp, hsp, conf_dir, state_path = detect_sunshine_config(target_user)
-    if enabled:
-        return enabled, hp, hsp, conf_dir, state_path
+    # Auto-repair corrupted host.conf created by legacy systemd %s specifier bug (/bin/bash/.config/nodedeck/...)
+    if enabled and conf_dir is not None:
+        conf_file = conf_dir / "host.conf"
+        if conf_file.exists():
+            raw_txt = conf_file.read_text(encoding="utf-8", errors="ignore")
+            if not re.search(r"=\s*/bin/(ba|z|da)?sh/", raw_txt):
+                return enabled, hp, hsp, conf_dir, state_path
+            conf_file.unlink(missing_ok=True)
+        else:
+            return enabled, hp, hsp, conf_dir, state_path
     host_bin = Path("/opt/nodedeck/host/bin/nodedeck-host")
     if not host_bin.is_file():
         return False, 47989, 47984, None, None

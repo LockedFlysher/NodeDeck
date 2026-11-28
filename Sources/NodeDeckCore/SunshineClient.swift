@@ -351,16 +351,22 @@ public final class SunshineClient: @unchecked Sendable {
                 print("ERR:SUDO_AUTH_FAILED", file=sys.stderr)
                 sys.exit(11)
 
-        nd_host_dir = os.path.expanduser("~/.config/nodedeck/host")
-        legacy_dir = os.path.expanduser("~/.config/sunshine")
-        if os.path.exists(os.path.join(nd_host_dir, "host.conf")) or os.path.exists("/opt/nodedeck/host/bin/nodedeck-host"):
-            conf_dir = nd_host_dir
-            conf_path = os.path.join(conf_dir, "host.conf")
+        candidates = [
+            (os.path.expanduser("~/.config/nodedeck"), "host.conf", "host_state.json"),
+            (os.path.expanduser("~/.config/nodedeck/host"), "host.conf", "sunshine_state.json"),
+            (os.path.expanduser("~/.config/sunshine"), "sunshine.conf", "sunshine_state.json"),
+        ]
+        conf_dir, conf_name, default_state = candidates[0]
+        for c_dir, c_name, d_state in candidates:
+            if os.path.exists(os.path.join(c_dir, c_name)):
+                conf_dir, conf_name, default_state = c_dir, c_name, d_state
+                break
         else:
-            conf_dir = legacy_dir
-            conf_path = os.path.join(conf_dir, "sunshine.conf")
+            if not os.path.exists("/opt/nodedeck/host/bin/nodedeck-host"):
+                conf_dir, conf_name, default_state = candidates[2]
         os.makedirs(conf_dir, exist_ok=True)
-        state_path = os.path.join(conf_dir, "sunshine_state.json")
+        conf_path = os.path.join(conf_dir, conf_name)
+        state_path = os.path.join(conf_dir, default_state)
 
         detected_port = \(httpPort)
         if os.path.exists(conf_path):
@@ -368,6 +374,12 @@ public final class SunshineClient: @unchecked Sendable {
             m = re.search(r"^\\s*port\\s*=\\s*(\\d+)", txt, re.M)
             if m:
                 detected_port = int(m.group(1))
+            ms = re.search(r"^\\s*file_state\\s*=\\s*(.+)$", txt, re.M)
+            if ms:
+                raw_st = ms.group(1).strip().replace("$HOME", os.path.expanduser("~"))
+                if not re.match(r"^/bin/(ba|z|da)?sh/", raw_st):
+                    state_path = raw_st if os.path.isabs(raw_st) else os.path.join(conf_dir, raw_st)
+        os.makedirs(os.path.dirname(state_path), exist_ok=True)
 
         state = {}
         if os.path.exists(state_path):

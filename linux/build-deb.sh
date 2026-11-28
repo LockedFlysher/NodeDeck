@@ -207,6 +207,27 @@ if [[ "$BUNDLE_HOST" == "1" ]]; then
     # Only base libraries preinstalled on standard Ubuntu/Debian desktops
     HOST_DEPENDS=", libpulse0, libcurl4t64 | libcurl4, libcap2, libwayland-client0"
 
+    cat > "$STAGE/opt/nodedeck/init-host-conf.sh" <<'EOF'
+#!/usr/bin/env bash
+set -e
+CFG_DIR="$HOME/.config/nodedeck"
+mkdir -p "$CFG_DIR"
+if [[ ! -f "$CFG_DIR/apps.json" ]]; then
+  printf '{\n  "env": {},\n  "apps": [{ "name": "Desktop", "image-path": "desktop.png" }]\n}\n' > "$CFG_DIR/apps.json"
+fi
+if [[ ! -f "$CFG_DIR/host.conf" ]] || grep -qE '= /bin/(ba|z|da)?sh/' "$CFG_DIR/host.conf"; then
+  cat > "$CFG_DIR/host.conf" <<CONF
+port = 47989
+file_apps = $CFG_DIR/apps.json
+file_state = $CFG_DIR/host_state.json
+credentials_file = $CFG_DIR/credentials.json
+pkey = $CFG_DIR/host.key
+cert = $CFG_DIR/host.cert
+CONF
+fi
+EOF
+    chmod 0755 "$STAGE/opt/nodedeck/init-host-conf.sh"
+
     cat > "$STAGE/usr/lib/systemd/user/nodedeck-host.service" <<'EOF'
 [Unit]
 Description=NodeDeck Built-in Remote Desktop Host (Sunshine)
@@ -216,7 +237,7 @@ After=graphical-session.target pipewire-pulse.service
 Type=simple
 PassEnvironment=DISPLAY WAYLAND_DISPLAY XAUTHORITY XDG_RUNTIME_DIR PULSE_SERVER
 Environment=DISPLAY=:0
-ExecStartPre=/bin/sh -c 'mkdir -p "$HOME/.config/nodedeck"; if [ ! -f "$HOME/.config/nodedeck/apps.json" ]; then printf "{\n  \"env\": {},\n  \"apps\": [{ \"name\": \"Desktop\", \"image-path\": \"desktop.png\" }]\n}\n" > "$HOME/.config/nodedeck/apps.json"; fi; if [ ! -f "$HOME/.config/nodedeck/host.conf" ]; then printf "port = 47989\nfile_apps = %s/.config/nodedeck/apps.json\nfile_state = %s/.config/nodedeck/host_state.json\ncredentials_file = %s/.config/nodedeck/credentials.json\npkey = %s/.config/nodedeck/host.key\ncert = %s/.config/nodedeck/host.cert\n" "$HOME" "$HOME" "$HOME" "$HOME" "$HOME" > "$HOME/.config/nodedeck/host.conf"; fi'
+ExecStartPre=/opt/nodedeck/init-host-conf.sh
 ExecStart=/opt/nodedeck/host/bin/nodedeck-host %h/.config/nodedeck/host.conf
 Restart=on-failure
 RestartSec=3
