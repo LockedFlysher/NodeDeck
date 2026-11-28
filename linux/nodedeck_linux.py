@@ -1560,12 +1560,13 @@ class NodeDeckWindow(Gtk.Window):
 
     def on_activate_local_ssh(self, _btn):
         ssh_ok = is_local_ssh_running()
+        has_pkexec = bool(shutil.which("pkexec"))
         dlg = Gtk.Dialog(
-            title=self.t("激活主机 SSH 服务", "Activate Host SSH Service"),
+            title=self.t("激活主机 SSH 服务（需要管理员提权）", "Activate Host SSH Service (Admin Required)"),
             transient_for=self,
             flags=0,
         )
-        dlg.set_default_size(440, 230)
+        dlg.set_default_size(460, 260)
         box = dlg.get_content_area()
         box.set_spacing(10)
         box.set_margin_top(14)
@@ -1575,19 +1576,21 @@ class NodeDeckWindow(Gtk.Window):
 
         msg = Gtk.Label(
             label=self.t(
-                "查看 CPU/GPU 实时性能面板、交互式终端和 SFTP 文件浏览需要本机开启 openssh-server（22 端口）。\n\n"
-                "请输入当前 Linux 管理员（sudo）密码，NodeDeck 将自动：\n"
-                "1. 安装并启动 openssh-server（开机自启）\n"
-                "2. 如开启了 ufw 防火墙，自动放行 22 与 47984-48010 端口\n"
-                "3. 同步当前账号的 SSH 公钥，此后手机/Mac 免密直连\n\n"
-                "（密码仅用于本次提权，绝不落盘或上传）"
-                + ("\n\n当前检测：端口 22 已开启，可重新同步公钥与防火墙规则。" if ssh_ok else ""),
+                "查看 CPU/GPU 实时性能面板、交互式终端与 SFTP 文件浏览需要本机运行 openssh-server（22 端口）。\n\n"
+                "NodeDeck 将申请一次管理员权限并自动执行：\n"
+                "1. 安装 openssh-server、补齐 /run/sshd 与主机密钥（ssh-keygen -A）\n"
+                "2. 自检 sshd -t、解决 Ubuntu 24.04 ssh.socket 冲突并开机自启 ssh.service\n"
+                "3. 如启用了 ufw 防火墙，自动放行 22 与 47984-48010 端口\n"
+                "4. 同步账号下全部设备公钥到 ~/.ssh/authorized_keys（此后手机/Mac 免密直连）\n\n"
+                "（提权凭据仅用于本次操作，绝不落盘或上传）"
+                + ("\n\n当前检测：端口 22 已开启，可再次执行以修复配置或同步公钥。" if ssh_ok else ""),
                 "Live CPU/GPU metrics, terminal, and SFTP require openssh-server on port 22.\n\n"
-                "Enter your Linux sudo password once to:\n"
-                "1. Install & start openssh-server (enabled on boot)\n"
-                "2. Allow ports 22 & 47984-48010 if UFW is active\n"
-                "3. Sync account SSH public keys into ~/.ssh/authorized_keys\n\n"
-                "(Password is never saved or transmitted.)",
+                "NodeDeck will request one-time administrator elevation to:\n"
+                "1. Install openssh-server, create /run/sshd & generate host keys (ssh-keygen -A)\n"
+                "2. Validate sshd -t, resolve Ubuntu 24.04 ssh.socket conflict & enable ssh.service\n"
+                "3. Allow ports 22 & 47984-48010 if UFW is active\n"
+                "4. Sync account SSH public keys into ~/.ssh/authorized_keys\n\n"
+                "(Credentials are never saved or transmitted.)",
             )
         )
         msg.set_xalign(0)
@@ -1596,14 +1599,22 @@ class NodeDeckWindow(Gtk.Window):
 
         ent_pwd = Gtk.Entry()
         ent_pwd.set_visibility(False)
-        ent_pwd.set_placeholder_text(self.t("输入本机 sudo 管理员密码", "Enter local sudo password"))
+        if has_pkexec:
+            ent_pwd.set_placeholder_text(
+                self.t(
+                    "留空将弹出系统管理员提权框（推荐），或直接输入 sudo 密码",
+                    "Leave blank for system auth prompt (recommended), or enter sudo password",
+                )
+            )
+        else:
+            ent_pwd.set_placeholder_text(self.t("输入本机 sudo 管理员密码", "Enter local sudo password"))
         ent_pwd.set_activates_default(True)
         box.pack_start(ent_pwd, False, False, 0)
 
         dlg.add_buttons(
             self.t("取消", "Cancel"),
             Gtk.ResponseType.CANCEL,
-            self.t("立即激活 SSH", "Activate SSH"),
+            self.t("提权并激活 SSH", "Elevate & Activate SSH"),
             Gtk.ResponseType.OK,
         )
         dlg.set_default_response(Gtk.ResponseType.OK)
@@ -1611,10 +1622,13 @@ class NodeDeckWindow(Gtk.Window):
         resp = dlg.run()
         pwd = ent_pwd.get_text()
         dlg.destroy()
-        if resp != Gtk.ResponseType.OK or not pwd:
+        if resp != Gtk.ResponseType.OK:
+            return
+        if not pwd and not has_pkexec:
+            self.status_label.set_text(self.t("未检测到 pkexec，请输入 sudo 密码以完成提权。", "pkexec unavailable; please enter sudo password."))
             return
 
-        self.status_label.set_text(self.t("正在激活本机 SSH 服务（安装/启动 openssh-server）…", "Activating local SSH service…"))
+        self.status_label.set_text(self.t("正在申请管理员提权并激活本机 SSH 服务…", "Requesting elevation and activating host SSH…"))
 
         def worker():
             script = (
@@ -1629,6 +1643,19 @@ class NodeDeckWindow(Gtk.Window):
                 "    pacman -Sy --noconfirm openssh; "
                 "  fi; "
                 "fi; "
+                "mkdir -p /run/sshd && chmod 0755 /run/sshd; "
+                "ssh-keygen -A >/dev/null 2>&1 || true; "
+                "if ! /usr/sbin/sshd -t 2>/dev/null; then "
+                "  if command -v dpkg-reconfigure >/dev/null 2>&1; then "
+                "    DEBIAN_FRONTEND=noninteractive dpkg-reconfigure openssh-server >/dev/null 2>&1 || true; "
+                "    mkdir -p /run/sshd && chmod 0755 /run/sshd; "
+                "    ssh-keygen -A >/dev/null 2>&1 || true; "
+                "  fi; "
+                "fi; "
+                "/usr/sbin/sshd -t; "
+                "systemctl stop ssh.socket 2>/dev/null || true; "
+                "systemctl disable ssh.socket 2>/dev/null || true; "
+                "systemctl reset-failed ssh.service sshd.service 2>/dev/null || true; "
                 "(systemctl enable --now ssh || systemctl enable --now sshd || service ssh start); "
                 "if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi 'Status: active'; then "
                 "  ufw allow 22/tcp >/dev/null 2>&1 || true; "
@@ -1637,16 +1664,25 @@ class NodeDeckWindow(Gtk.Window):
                 "fi"
             )
             try:
-                proc = subprocess.run(
-                    ["sudo", "-S", "-k", "bash", "-c", script],
-                    input=pwd + "\n",
-                    capture_output=True,
-                    text=True,
-                    timeout=180,
-                )
+                if pwd:
+                    proc = subprocess.run(
+                        ["sudo", "-S", "-k", "bash", "-c", script],
+                        input=pwd + "\n",
+                        capture_output=True,
+                        text=True,
+                        timeout=180,
+                    )
+                else:
+                    proc = subprocess.run(
+                        ["pkexec", "bash", "-c", script],
+                        capture_output=True,
+                        text=True,
+                        timeout=180,
+                    )
                 if proc.returncode != 0:
-                    err = (proc.stderr or proc.stdout).strip().splitlines()[-1:] or ["sudo failed"]
-                    GLib.idle_add(self.status_label.set_text, self.t(f"激活 SSH 失败: {err[0]}", f"SSH activation failed: {err[0]}"))
+                    lines = [ln.strip() for ln in (proc.stderr or proc.stdout).splitlines() if ln.strip() and "[sudo]" not in ln]
+                    err_msg = "\n".join(lines[-4:]) if lines else f"Exit code {proc.returncode}"
+                    GLib.idle_add(self._on_ssh_activation_failed, err_msg)
                     return
                 acct = load_account_session()
                 if acct.get("token"):
@@ -1654,9 +1690,23 @@ class NodeDeckWindow(Gtk.Window):
                     sync_account_ssh_keys(fresh)
                 GLib.idle_add(self._on_ssh_activated)
             except Exception as exc:
-                GLib.idle_add(self.status_label.set_text, self.t(f"激活 SSH 异常: {exc}", f"SSH activation error: {exc}"))
+                GLib.idle_add(self._on_ssh_activation_failed, str(exc))
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _on_ssh_activation_failed(self, err_msg: str):
+        self._update_chrome_labels()
+        self.status_label.set_text(self.t(f"激活 SSH 失败: {err_msg.splitlines()[-1]}", f"SSH activation failed: {err_msg.splitlines()[-1]}"))
+        md = Gtk.MessageDialog(
+            transient_for=self,
+            flags=0,
+            message_type=Gtk.MessageType.ERROR,
+            buttons=Gtk.ButtonsType.OK,
+            text=self.t("激活主机 SSH 失败", "Host SSH Activation Failed"),
+        )
+        md.format_secondary_text(err_msg)
+        md.run()
+        md.destroy()
 
     def _on_ssh_activated(self):
         self._update_chrome_labels()
