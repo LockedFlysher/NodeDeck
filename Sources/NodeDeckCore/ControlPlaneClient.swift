@@ -633,6 +633,7 @@ public enum EmbeddedEasyTierManager {
         multi_thread = true
         latency_first = true
         disable_tcp_hole_punching = true
+        disable_sym_hole_punching = true
         """
         try toml.write(to: runtimeTomlURL, atomically: true, encoding: .utf8)
         try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: runtimeTomlURL.path)

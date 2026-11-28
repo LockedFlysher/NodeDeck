@@ -209,7 +209,8 @@ pub fn build_easytier_runtime_toml(
          default_protocol = \"udp\"\n\
          multi_thread = true\n\
          latency_first = true\n\
-         disable_tcp_hole_punching = true\n",
+         disable_tcp_hole_punching = true\n\
+         disable_sym_hole_punching = true\n",
         session.device.device_name,
         session.device.virtual_cidr,
         session.mesh.network_name,
@@ -515,6 +516,7 @@ mod tests {
         assert!(!toml.contains("tcp://0.0.0.0:28443"));
         assert!(!toml.contains("mapped_listeners"));
         assert!(toml.contains("disable_tcp_hole_punching = true"));
+        assert!(toml.contains("disable_sym_hole_punching = true"));
         assert!(toml.contains("uri = \"udp://lockedflysher.duckdns.org:25565\""));
         assert!(!toml.contains("tcp://lockedflysher.duckdns.org"));
     }
