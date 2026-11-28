@@ -126,15 +126,8 @@ pub fn expand_seed_uris(raw: &str) -> Vec<String> {
             if !ordered.contains(&uri) {
                 ordered.push(uri);
             }
-        } else if let Some(rest) = uri.strip_prefix("udp://") {
-            if !ordered.contains(&uri) {
-                ordered.push(uri.clone());
-            }
-            let tcp = format!("tcp://{rest}");
-            if !ordered.contains(&tcp) {
-                ordered.push(tcp);
-            }
         } else if !ordered.contains(&uri) {
+            // Explicit udp:// (or ws/wg/quic) URI is preserved verbatim without synthesizing TCP.
             ordered.push(uri);
         }
     }
@@ -186,9 +179,12 @@ fn is_usable_lan_ip(ip: &str, mesh_prefix3: &str) -> bool {
 }
 
 /// Generates a uniform EasyTier runtime TOML across macOS, Linux, and Android.
+/// Uses pure UDP listeners and disables TCP hole-punching so slow proxy-routed TCP tunnels
+/// never override fast UDP P2P or UDP Relay paths; omits private-IP `mapped_listeners` so
+/// EasyTier's own local interface discovery and UPnP/IGD WAN port mapping work cleanly.
 pub fn build_easytier_runtime_toml(
     session: &AccountSession,
-    lan_ips: &[String],
+    _lan_ips: &[String],
     dev_name: Option<&str>,
 ) -> String {
     let port = if session.mesh.listen_port >= 1024 {
@@ -196,10 +192,6 @@ pub fn build_easytier_runtime_toml(
     } else {
         28443
     };
-    let mapped: Vec<String> = lan_ips
-        .iter()
-        .map(|ip| format!("\"udp://{ip}:{port}\""))
-        .collect();
     let peer_blocks: Vec<String> = expand_seed_uris(&session.mesh.seed_uri)
         .into_iter()
         .map(|uri| format!("[[peer]]\nuri = \"{uri}\""))
@@ -208,8 +200,7 @@ pub fn build_easytier_runtime_toml(
     let mut out = format!(
         "hostname = \"{}\"\n\
          ipv4 = \"{}\"\n\
-         listeners = [\"udp://0.0.0.0:{port}\", \"tcp://0.0.0.0:{port}\"]\n\
-         mapped_listeners = [{}]\n\n\
+         listeners = [\"udp://0.0.0.0:{port}\"]\n\n\
          [network_identity]\n\
          network_name = \"{}\"\n\
          network_secret = \"{}\"\n\n\
@@ -217,10 +208,10 @@ pub fn build_easytier_runtime_toml(
          [flags]\n\
          default_protocol = \"udp\"\n\
          multi_thread = true\n\
-         latency_first = true\n",
+         latency_first = true\n\
+         disable_tcp_hole_punching = true\n",
         session.device.device_name,
         session.device.virtual_cidr,
-        mapped.join(", "),
         session.mesh.network_name,
         session.mesh.network_secret,
         peer_blocks.join("\n\n"),
@@ -501,6 +492,31 @@ mod tests {
                 "tcp://seed.example.com:11010",
             ]
         );
+    }
+
+    #[test]
+    fn expand_seed_uris_preserves_single_udp_without_synthesizing_tcp() {
+        let uris = expand_seed_uris("udp://lockedflysher.duckdns.org:25565");
+        assert_eq!(uris, vec!["udp://lockedflysher.duckdns.org:25565"]);
+    }
+
+    #[test]
+    fn build_runtime_toml_enforces_pure_udp_without_private_mapped_listeners() {
+        let json = r#"{
+            "server_url": "https://lockedflysher.duckdns.org",
+            "token": "t",
+            "user": {"email": "a@b.c", "username": "u"},
+            "device": {"id": "1", "device_name": "mechrevo", "platform": "linux", "virtual_ip": "10.99.0.5", "virtual_cidr": "10.99.0.5/24"},
+            "mesh": {"network_name": "nd-u", "network_secret": "sec", "seed_uri": "udp://lockedflysher.duckdns.org:25565", "listen_port": 28443}
+        }"#;
+        let session = AccountSession::parse_compat_json(json).unwrap();
+        let toml = build_easytier_runtime_toml(&session, &["192.168.31.254".into()], Some("et-nodedeck"));
+        assert!(toml.contains("listeners = [\"udp://0.0.0.0:28443\"]"));
+        assert!(!toml.contains("tcp://0.0.0.0:28443"));
+        assert!(!toml.contains("mapped_listeners"));
+        assert!(toml.contains("disable_tcp_hole_punching = true"));
+        assert!(toml.contains("uri = \"udp://lockedflysher.duckdns.org:25565\""));
+        assert!(!toml.contains("tcp://lockedflysher.duckdns.org"));
     }
 
     #[test]

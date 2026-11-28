@@ -127,28 +127,21 @@ object MeshConfigCodec {
                     if (udpUri !in ordered) ordered.add(udpUri)
                     if (uri !in ordered) ordered.add(uri)
                 }
-                uri.startsWith("udp://") -> {
-                    if (uri !in ordered) ordered.add(uri)
-                    val tcpUri = "tcp://" + uri.removePrefix("udp://")
-                    if (tcpUri !in ordered) ordered.add(tcpUri)
-                }
                 else -> if (uri !in ordered) ordered.add(uri)
             }
         }
         return ordered
     }
 
-    fun buildRuntimeToml(config: MeshConfig, lanIps: List<String>): String {
+    fun buildRuntimeToml(config: MeshConfig, @Suppress("UNUSED_PARAMETER") lanIps: List<String>): String {
         val port = config.port.coerceIn(1024, 65535)
-        val mapped = lanIps.map { ip -> "\"udp://$ip:$port\"" }
         val ipv4WithMask = if (config.ipv4.contains("/")) config.ipv4.trim() else "${config.ipv4.trim()}/24"
         val seedUris = expandSeedUris(config.seedUri)
         return buildString {
             appendLine("instance_name = \"$INSTANCE_NAME\"")
             appendLine("hostname = \"${escapeToml(config.hostname.ifBlank { "android" })}\"")
             appendLine("ipv4 = \"${escapeToml(ipv4WithMask)}\"")
-            appendLine("listeners = [\"udp://0.0.0.0:$port\", \"tcp://0.0.0.0:$port\"]")
-            appendLine("mapped_listeners = [${mapped.joinToString(", ")}]")
+            appendLine("listeners = [\"udp://0.0.0.0:$port\"]")
             appendLine()
             appendLine("[network_identity]")
             appendLine("network_name = \"${escapeToml(config.networkName)}\"")
@@ -163,6 +156,7 @@ object MeshConfigCodec {
             appendLine("default_protocol = \"udp\"")
             appendLine("multi_thread = true")
             appendLine("latency_first = true")
+            appendLine("disable_tcp_hole_punching = true")
         }
     }
 

@@ -601,10 +601,6 @@ public enum EmbeddedEasyTierManager {
                 let udpUri = "udp://" + uri.dropFirst("tcp://".count)
                 if !ordered.contains(udpUri) { ordered.append(udpUri) }
                 if !ordered.contains(uri) { ordered.append(uri) }
-            } else if uri.hasPrefix("udp://") {
-                if !ordered.contains(uri) { ordered.append(uri) }
-                let tcpUri = "tcp://" + uri.dropFirst("udp://".count)
-                if !ordered.contains(tcpUri) { ordered.append(tcpUri) }
             } else if !ordered.contains(uri) {
                 ordered.append(uri)
             }
@@ -617,17 +613,14 @@ public enum EmbeddedEasyTierManager {
             throw ControlPlaneError.serverError("Missing mesh credentials in account session")
         }
         try FileManager.default.createDirectory(at: meshDirURL, withIntermediateDirectories: true)
-        let lanIPs = discoverLanIPs(excludingSubnetOf: session.virtualCidr)
         let port = max(1024, min(65535, mesh.listenPort))
-        let mapped = lanIPs.map { "\"udp://\($0):\(port)\"" }.joined(separator: ", ")
         let peerBlocks = expandSeedUris(mesh.seedUri)
             .map { "[[peer]]\nuri = \"\($0)\"" }
             .joined(separator: "\n\n")
         let toml = """
         hostname = "\(session.deviceName.isEmpty ? "mac" : session.deviceName)"
         ipv4 = "\(session.virtualCidr)"
-        listeners = ["udp://0.0.0.0:\(port)", "tcp://0.0.0.0:\(port)"]
-        mapped_listeners = [\(mapped)]
+        listeners = ["udp://0.0.0.0:\(port)"]
 
         [network_identity]
         network_name = "\(mesh.networkName)"
@@ -639,6 +632,7 @@ public enum EmbeddedEasyTierManager {
         default_protocol = "udp"
         multi_thread = true
         latency_first = true
+        disable_tcp_hole_punching = true
         """
         try toml.write(to: runtimeTomlURL, atomically: true, encoding: .utf8)
         try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: runtimeTomlURL.path)

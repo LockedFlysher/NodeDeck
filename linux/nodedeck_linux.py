@@ -1778,6 +1778,8 @@ class NodeDeckWindow(Gtk.Window):
         self.reload_hosts()
         self.sync_account_async(silent=True)
         self.refresh_all_metrics_async()
+        # Keep P2P / UDP Relay / TCP Relay badges live as EasyTier upgrades tunnels
+        GLib.timeout_add_seconds(8, self._periodic_mesh_transport_tick)
 
     def t(self, zh: str, en: str) -> str:
         return zh if self.lang == "zh" else en
@@ -2711,11 +2713,20 @@ class NodeDeckWindow(Gtk.Window):
         subprocess.Popen([code_bin, "--remote", f"ssh-remote+{host['alias']}"])
         self.status_label.set_text(self.t(f"正在通过 VS Code 打开 {host['alias']}…", f"Opening {host['alias']} in VS Code…"))
 
-    def refresh_mesh_transports_async(self):
+    def _periodic_mesh_transport_tick(self):
+        self.refresh_mesh_transports_async(only_if_route_changed=True)
+        return True
+
+    def refresh_mesh_transports_async(self, only_if_route_changed: bool = False):
         def _bg():
             peers = fetch_easytier_peer_transports()
             def _apply():
-                changed = peers != self.mesh_transports
+                def _sig(items):
+                    return [
+                        (x.get("ipv4"), x.get("hostname"), x.get("is_p2p"), x.get("is_tcp_relay"), x.get("badge"))
+                        for x in (items or [])
+                    ]
+                changed = (_sig(peers) != _sig(self.mesh_transports)) if only_if_route_changed else (peers != self.mesh_transports)
                 self.mesh_transports = peers
                 if changed and self.selected_host:
                     self.render_detail()
